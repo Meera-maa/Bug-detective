@@ -13,15 +13,19 @@ import { escapeRegExp, findJsonObject, firstLine } from "./text";
  *   2. The same error caused by an API response with a different shape than the code expects
  *   3. Empty input (empty string / empty array) that is indexed with [0]
  *   4. ReferenceError: x is not defined
- *   5. SyntaxError (unexpected token / missing bracket/comma/etc.)
+ *   5. SyntaxError — including the specific case of a server returning HTML instead of JSON
  *   6. RangeError: Maximum call stack size exceeded (infinite recursion)
  *   7. RangeError: Invalid array length (negative or non-integer size)
- *   8. "X is not a function" / "X is not iterable" (wrong-type call)
+ *   8. "X is not a function" / "X is not iterable" — including Array methods on objects
  *   9. Missing return — function silently returns undefined and caller reads a property
- *  10. async/await forgotten — Promise used as a plain value ("then is not a function" etc.)
+ *  10. async/await forgotten — Promise used as a plain value
+ *  11. Network / fetch failure (Failed to fetch, CORS, net::ERR_*)
+ *  12. Unhandled promise rejection (missing .catch / try-catch)
+ *  13. Logic / wrong-operator error (= vs ===, off-by-one, NaN comparison)
  *
- * Fallback: analyzeGeneric runs for everything else. It quotes real evidence from the input
- * but does not fabricate a root cause it cannot prove.
+ * Fallback (analyzeGeneric): runs for everything else. It reasons from the error type,
+ * stack trace, and code structure to provide the most specific diagnosis possible from
+ * the available evidence. It never fabricates a root cause it cannot point to.
  */
 
 // ---------------------------------------------------------------------------
@@ -145,19 +149,29 @@ export function analyze(input: InvestigationInput): Analysis {
       const found = analyzeReferenceError(input, combined, ref[1]);
       if (found) return found;
     }
-    // Patterns 5-10: additional JS/TS patterns
+    // Patterns 5-13: additional JS/TS patterns
     const synFound = analyzeSyntaxError(input, combined);
     if (synFound) return synFound;
     const stackFound = analyzeStackOverflow(input, combined);
     if (stackFound) return stackFound;
     const rangeFound = analyzeInvalidArrayLength(input, combined);
     if (rangeFound) return rangeFound;
-    const notFnFound = analyzeNotAFunction(input, combined);
-    if (notFnFound) return notFnFound;
+    // UnhandledPromiseRejection is a process-level event — check it before the
+    // async/await pattern so a missing .catch() gets the right diagnosis.
+    const rejectionFound = analyzeUnhandledRejection(input, combined);
+    if (rejectionFound) return rejectionFound;
+    // async/await must run before not-a-function: ".then is not a function" matches both,
+    // but the async pattern gives a more specific diagnosis.
     const asyncFound = analyzeAsyncAwaitForgotten(input, combined);
     if (asyncFound) return asyncFound;
+    const notFnFound = analyzeNotAFunction(input, combined);
+    if (notFnFound) return notFnFound;
     const returnFound = analyzeMissingReturn(input, combined);
     if (returnFound) return returnFound;
+    const networkFound = analyzeNetworkFailure(input, combined);
+    if (networkFound) return networkFound;
+    const logicFound = analyzeLogicError(input, combined);
+    if (logicFound) return logicFound;
   }
   return analyzeGeneric(input, combined, isJsLike);
 }
@@ -528,7 +542,7 @@ function analyzeReferenceError(input: InvestigationInput, combined: string, name
 }
 
 // ---------------------------------------------------------------------------
-// Fallback: honest low-confidence answer
+// Fallback: evidence-driven reasoner
 // ---------------------------------------------------------------------------
 
 function analyzeGeneric(input: InvestigationInput, combined: string, isJsLike: boolean): Analysis {
@@ -537,41 +551,110 @@ function analyzeGeneric(input: InvestigationInput, combined: string, isJsLike: b
   const frame = parseStackFrame(input.stackTrace ?? combined);
   const kind = /^\s*([A-Za-z]*(?:Error|Exception))\b/.exec(headline)?.[1];
   const status = /\b([45]\d{2})\b/.exec(headline)?.[1];
+  const stackLine = frame ? lines.find((l) => l.n === frame.line) : undefined;
 
+  // ── Collect evidence from the actual input ─────────────────────────────────
   const evidence: string[] = [`The error message reads: \`${truncate(headline, 90)}\`.`];
   if (kind) evidence.push(`The error type is \`${kind}\`.`);
-  if (status) evidence.push(`The status code \`${status}\` was reported${status.startsWith("5") ? ", which usually means the failure happened on the server, not in the calling code" : ", which usually means the request itself was rejected"}.`);
-  if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}:${frame.col}\`${frame.fn ? ` in \`${frame.fn}\`` : ""}.`);
-
-  // Only quote code lines that mention identifiers found in the error text.
-  const words = Array.from(new Set(headline.match(/['"`]([A-Za-z_$][\w$.]*)['"`]/g)?.map((w) => w.slice(1, -1)) ?? []));
-  for (const w of words.slice(0, 2)) {
-    const hit = lines.find((l) => new RegExp(`\\b${escapeRegExp(w)}\\b`).test(l.text));
-    if (hit) evidence.push(`\`${w}\` from the error appears on line ${hit.n}: \`${truncate(hit.text)}\`.`);
+  if (status) {
+    evidence.push(`The status code \`${status}\` was reported${status.startsWith("5") ? ", which usually means the failure happened on the server, not in the calling code" : ", which usually means the request itself was rejected"}.`);
   }
-  evidence.push(
-    isJsLike
-      ? "The built-in analyzer did not recognise this as one of its known patterns, so it cannot name a root cause."
-      : `The built-in analyzer only understands JavaScript and TypeScript patterns, so it cannot analyse ${input.language} code. IBM Bob is meant to cover this.`,
-  );
+  if (frame) {
+    evidence.push(`The stack trace points to \`${frame.file}:${frame.line}:${frame.col}\`${frame.fn ? ` in \`${frame.fn}\`` : ""}.`);
+  }
+  if (stackLine) {
+    evidence.push(`Line ${stackLine.n} in the pasted code reads: \`${truncate(stackLine.text)}\`.`);
+  }
 
-  const fnName = findEnclosingFunction(lines, lines.length)?.name;
+  // Quote code lines that mention identifiers found in the error text.
+  const quotedWords = Array.from(new Set(headline.match(/['"`]([A-Za-z_$][\w$.]*)['"`]/g)?.map((w) => w.slice(1, -1)) ?? []));
+  for (const w of quotedWords.slice(0, 3)) {
+    const hit = lines.find((l) => new RegExp(`\\b${escapeRegExp(w)}\\b`).test(l.text));
+    if (hit && hit !== stackLine) evidence.push(`\`${w}\` from the error appears on line ${hit.n}: \`${truncate(hit.text)}\`.`);
+  }
+
+  // ── Infer the most specific problem, rootCause and fix from what we have ───
+
+  // Heuristic: what function context does the failing line live in?
+  const enclosing = stackLine ? findEnclosingFunction(lines, stackLine.n) : findEnclosingFunction(lines, lines.length);
+  const fnName = enclosing?.name;
+
+  // Determine a language-aware root cause from error kind + code context.
+  let problem = truncate(headline, 140) || "An error was reported.";
+  let rootCause: string;
+  let confidence: Confidence = "Low";
+  let suggestedFix: string;
+  let testSuggestion: string;
+
+  // ── Classify by error kind ─────────────────────────────────────────────────
+  if (!isJsLike) {
+    // Non-JS language: honest about the limitation.
+    // Keep the exact phrase "only understands JavaScript and TypeScript" so existing tests pass.
+    evidence.push(`The built-in analyzer only understands JavaScript and TypeScript patterns, so it cannot analyse ${input.language} code.`);
+    rootCause = `The built-in analyzer only understands JavaScript and TypeScript patterns and cannot diagnose ${input.language} code. The evidence below is taken from the raw input.`;
+    suggestedFix = `Use the error message and the stack trace line to locate the problem. Search for \`${truncate(headline, 60)}\` in your ${input.language} documentation for language-specific guidance.`;
+    testSuggestion = `Once the cause is identified, write a test that reproduces the error scenario and confirm it passes after the fix.`;
+    if (!stackLine && !frame) {
+      evidence.push(`No stack trace was provided. Include the full stack trace for a more precise diagnosis.`);
+    }
+  } else if (kind === "TypeError" || (!kind && /TypeError/i.test(combined))) {
+    // TypeError but didn't match the specific handlers above.
+    if (stackLine) {
+      rootCause = `A \`TypeError\` was thrown on line ${stackLine.n} (\`${truncate(stackLine.text)}\`). This usually means a value that was expected to be an object, function, or array was \`undefined\`, \`null\`, or the wrong type at that point.`;
+      suggestedFix = `Inspect the value on line ${stackLine.n} before it is used. Add a type-check or guard (e.g. \`if (typeof x !== "undefined")\`) around the failing operation, or trace back where the value comes from and fix its source.`;
+    } else {
+      rootCause = `A \`TypeError\` was thrown. This usually means a value that was expected to be an object, function, or array was \`undefined\`, \`null\`, or the wrong type. Include the full stack trace to pinpoint the exact line.`;
+      suggestedFix = `Find the line named in the full stack trace and check every value used there. Add defensive checks or TypeScript types to prevent the wrong type from reaching that code.`;
+    }
+    confidence = stackLine ? "Medium" : "Low";
+    testSuggestion = `Write a test that calls the function with the input that triggered the error. Assert it no longer throws after the fix, and also verify the normal case still works.`;
+  } else if (kind === "EvalError" || kind === "URIError") {
+    rootCause = `A \`${kind}\` was thrown, which usually means an invalid argument was passed to a built-in function (\`eval\`, \`encodeURIComponent\`, \`decodeURIComponent\`, etc.).`;
+    suggestedFix = `Validate the argument before passing it to the built-in function. For URI errors, check for malformed percent-encoding or characters that are illegal in a URI component.`;
+    confidence = "Medium";
+    testSuggestion = `Cover: a valid argument (normal case), the malformed value that caused the error, and an empty string.`;
+  } else if (kind && /Error$/i.test(kind) && stackLine) {
+    // Some named error + a pinpointed line.
+    rootCause = `A \`${kind}\` was thrown at line ${stackLine.n} (\`${truncate(stackLine.text)}\`). ${fnName ? `It originated inside \`${fnName}\`.` : ""} Inspect the values used on that line.`;
+    suggestedFix = `Check every value used on line ${stackLine.n}. Verify that none of them can be \`undefined\`, \`null\`, or an unexpected type at runtime. Add a guard or validate inputs earlier in the call chain.`;
+    confidence = "Medium";
+    testSuggestion = `Write a test that reproduces the failing input and confirm the error no longer occurs after the fix.`;
+  } else if (status) {
+    // HTTP error without a more specific handler.
+    const serverSide = status.startsWith("5");
+    problem = `HTTP ${status} error${frame?.fn ? ` in \`${frame.fn}\`` : ""}.`;
+    rootCause = serverSide
+      ? `The server returned a ${status} error, which indicates a problem on the server side, not in the JavaScript code. The calling code may need to handle this response gracefully.`
+      : `The server rejected the request with a ${status} status code, which usually means a client error (wrong URL, missing authentication, bad request body). Check that the request is formed correctly.`;
+    suggestedFix = serverSide
+      ? `Check the server logs for the root cause. In the client code, add error handling around the fetch/request call so a 5xx response is caught and reported clearly instead of crashing.`
+      : `Verify the request URL, method, headers, and body. A ${status} usually means the client sent something the server did not accept.`;
+    confidence = "Medium";
+    testSuggestion = `Mock the server response in tests: cover a successful response, a ${status} response (should be handled gracefully), and a network error.`;
+  } else {
+    // Completely unknown — be maximally honest.
+    rootCause = `The available information is not enough to identify the root cause with confidence. The error message and the clues below narrow where to look.`;
+    const missingInfo: string[] = [];
+    if (!frame && !input.stackTrace) missingInfo.push("a stack trace");
+    if (lines.length < 3) missingInfo.push("more of the surrounding code");
+    if (missingInfo.length > 0) {
+      evidence.push(`To get a more precise diagnosis, also provide: ${missingInfo.join(" and ")}.`);
+    }
+    suggestedFix = stackLine
+      ? `Start at line ${stackLine.n} (\`${truncate(stackLine.text)}\`). Check every value used on that line — particularly any that could be \`undefined\`, \`null\`, a different type than expected, or out of range.`
+      : `Find the line named in the full stack trace and check every value used there. Add a \`console.log\` before the failing call to inspect the values at runtime.`;
+    testSuggestion = `Once the cause is identified, write a test that reproduces the failing scenario and verify it passes after the fix.`;
+  }
+
   return {
     plan: { kind: "generic", fnName },
     result: {
-      problem: truncate(headline, 140) || "An error was reported.",
-      rootCause:
-        "No confident root cause could be identified from this input. The clues below narrow where to look, but they do not prove a cause.",
+      problem,
+      rootCause,
       evidence,
-      confidence: "Low",
-      suggestedFix: [
-        "Work through these steps to narrow it down:",
-        "- Log the values used on the line named in the stack trace, right before it runs.",
-        "- Check which of those values can be missing, empty or a different type than the code assumes.",
-        "- Paste a smaller piece of code, the full stack trace, or the data involved for a sharper analysis.",
-      ].join("\n"),
-      testSuggestion:
-        "Once the cause is known, write a test that reproduces the failing input first, then confirm it passes after the fix.",
+      confidence,
+      suggestedFix,
+      testSuggestion,
     },
   };
 }
@@ -586,6 +669,63 @@ function analyzeSyntaxError(input: InvestigationInput, combined: string): Analys
   const headline = firstLine(input.error);
   const frame = parseStackFrame(input.stackTrace ?? combined);
 
+  // ── Sub-case: server returned HTML instead of JSON ────────────────────────
+  // Triggered by: SyntaxError: Unexpected token '<', "<!DOCTYPE "... is not valid JSON
+  // or:           SyntaxError: Unexpected non-whitespace character after JSON
+  // The '<' is the first byte of an HTML page returned by the server.
+  const isHtmlResponse =
+    /Unexpected token ['"]?<['"]?/i.test(headline) ||
+    /<!DOCTYPE/i.test(combined) ||
+    /is not valid JSON/i.test(headline);
+
+  if (isHtmlResponse) {
+    const hasFetch = /\bfetch\s*\(/.test(input.code);
+    const hasJson = /\.json\s*\(/.test(input.code);
+    const fetchLine = lines.find((l) => /\.json\s*\(/.test(l.text)) ?? lines.find((l) => /\bfetch\s*\(/.test(l.text));
+    const evidence: string[] = [
+      `The error message reads: \`${truncate(headline, 90)}\`.`,
+      `The token \`<\` is the first character of an HTML document. \`JSON.parse()\` cannot parse HTML, so the server sent an HTML page (such as a 404 error page or login redirect) instead of the expected JSON.`,
+    ];
+    if (fetchLine) evidence.push(`Line ${fetchLine.n} (\`${truncate(fetchLine.text)}\`) calls \`${hasFetch && !hasJson ? "fetch" : "response.json()"}\`, which parses the response body as JSON — if the server returns HTML, this throws.`);
+    if (hasFetch && hasJson) evidence.push(`The code uses \`fetch\` and \`response.json()\`. \`response.json()\` throws a SyntaxError when the response body is not valid JSON.`);
+    evidence.push(`Common causes: the endpoint URL is wrong (returns a 404 HTML page), the server is down (returns a 500 error page), or a redirect sent the request to a login page.`);
+
+    // Build a fixed code that checks response.ok before parsing.
+    let fixedCode: string | undefined;
+    const responseLine = lines.find((l) => /const\s+(\w+)\s*=\s*await\s+fetch\s*\(/.test(l.text));
+    if (responseLine) {
+      const responseVar = /const\s+(\w+)\s*=\s*await\s+fetch/.exec(responseLine.text)?.[1] ?? "response";
+      const ind = indentOf(responseLine.text) + "  ";
+      const insertIdx = responseLine.n; // insert after the fetch line
+      const guard = [
+        `${indentOf(responseLine.text)}if (!${responseVar}.ok) {`,
+        `${ind}throw new Error(\`Server returned \${${responseVar}.status}: \${${responseVar}.statusText}\`);`,
+        `${indentOf(responseLine.text)}}`,
+      ];
+      fixedCode = insertAfterLine(input.code.split("\n"), insertIdx, guard).join("\n");
+    }
+
+    const fnName = fetchLine ? findEnclosingFunction(lines, fetchLine.n)?.name : undefined;
+    return {
+      plan: { kind: "generic", fnName },
+      result: {
+        problem: `\`response.json()\` received an HTML response instead of JSON, causing a SyntaxError.`,
+        rootCause: `The server returned an HTML document (starting with \`<\`) where JSON was expected. This happens when the endpoint URL returns an error page, redirect, or login page instead of the API response. \`response.json()\` always throws when the body is not valid JSON.`,
+        evidence,
+        confidence: "High",
+        suggestedFix: [
+          `Check \`response.ok\` (or \`response.status\`) before calling \`.json()\`. When the status is not 2xx, the body is likely an error page, not JSON.`,
+          `Why it works: \`response.ok\` is \`false\` for 4xx/5xx responses. Throwing an explicit error at that point gives a clear message instead of a confusing SyntaxError.`,
+          `Also verify: is the URL correct? Does the endpoint require authentication? Is the server running?`,
+          ...(fixedCode ? [`Fixed code adds an \`if (!${/const\s+(\w+)\s*=\s*await\s+fetch/.exec(responseLine?.text ?? "")?.[1] ?? "response"}.ok)\` guard after the \`fetch\` call.`] : []),
+        ].join("\n\n"),
+        testSuggestion: `Cover: a mock that returns valid JSON (normal case); a mock that returns a 404 HTML page (the bug — should now throw a clear error, not a SyntaxError); a mock that returns a 500 error page.`,
+        ...(fixedCode ? { fixedCode } : {}),
+      },
+    };
+  }
+
+  // ── General SyntaxError ───────────────────────────────────────────────────
   // Extract what the parser found unexpected, if described.
   const unexpected = /Unexpected (token|identifier|end of input|reserved word)\s*['"]?([^\s'"]*)?/i.exec(headline);
   const unexpectedDesc = unexpected ? `${unexpected[1]}${unexpected[2] ? ` \`${unexpected[2]}\`` : ""}` : null;
@@ -752,6 +892,9 @@ function analyzeInvalidArrayLength(input: InvestigationInput, combined: string):
 // Pattern 8: X is not a function / X is not iterable
 // ---------------------------------------------------------------------------
 
+// Array methods that only exist on Array.prototype
+const ARRAY_ONLY_METHODS = new Set(["filter", "map", "reduce", "forEach", "find", "findIndex", "some", "every", "flat", "flatMap", "includes", "indexOf", "lastIndexOf", "sort", "splice", "slice", "fill", "copyWithin"]);
+
 function analyzeNotAFunction(input: InvestigationInput, combined: string): Analysis | null {
   // Match "X is not a function" or "X is not iterable"
   const m =
@@ -763,23 +906,78 @@ function analyzeNotAFunction(input: InvestigationInput, combined: string): Analy
   const problem = m[2].toLowerCase(); // "a function" or "iterable"
   const lines = toLines(input.code);
   const frame = parseStackFrame(input.stackTrace ?? combined);
+
+  // Decompose: if callee is "users.filter", receiver = "users", method = "filter"
+  const dotIdx = callee.lastIndexOf(".");
+  const receiverName = dotIdx > 0 ? callee.slice(0, dotIdx) : null;
+  const methodName = dotIdx > 0 ? callee.slice(dotIdx + 1) : callee;
+  const isArrayMethod = ARRAY_ONLY_METHODS.has(methodName);
+
   const calleeRe = new RegExp(`\\b${escapeRegExp(callee)}\\b`);
 
   // Find lines in the code that use the callee.
   const usageLine = frame ? lines.find((l) => l.n === frame.line && calleeRe.test(l.text)) : undefined;
   const anyUsage = usageLine ?? lines.find((l) => calleeRe.test(l.text));
 
-  // Find where callee was assigned or declared.
-  const assignRe = new RegExp(`(?:const|let|var)\\s+${escapeRegExp(callee.split(".").pop()!)}\\s*(?::[^=]+)?=\\s*([^;\\n]+)`);
+  // Find where the receiver is declared/assigned.
+  const receiverBase = receiverName ?? callee.split(".")[0];
+  const assignRe = new RegExp(`(?:const|let|var)\\s+${escapeRegExp(receiverBase)}\\s*(?::[^=]+)?=\\s*([^;\\n]+)`);
   const assignLine = lines.find((l) => assignRe.test(l.text));
+  const assignedExpr = assignLine ? (assignRe.exec(assignLine.text)?.[1] ?? "").trim() : null;
+
+  // Detect if the receiver is an object literal (not an array).
+  const isObjectLiteral = assignedExpr ? /^\{/.test(assignedExpr.trim()) : false;
 
   const evidence: string[] = [
     `The error says \`${callee}\` is not ${problem}, meaning the code tries to ${problem === "a function" ? `call \`${callee}()\`` : `iterate over \`${callee}\``} but \`${callee}\` holds a different type at runtime.`,
   ];
   if (anyUsage) evidence.push(`\`${callee}\` is ${problem === "a function" ? "called" : "iterated"} on line ${anyUsage.n} (\`${truncate(anyUsage.text)}\`).`);
+
+  // ── Sub-case: Array method called on a plain object ───────────────────────
+  if (isArrayMethod && receiverName && (isObjectLiteral || assignedExpr)) {
+    if (isObjectLiteral && assignLine) {
+      evidence.push(`\`${receiverBase}\` is assigned a plain object (\`{ ... }\`) on line ${assignLine.n} (\`${truncate(assignLine.text)}\`). Plain objects do not have a \`.${methodName}()\` method — that method only exists on Arrays.`);
+    } else if (assignLine) {
+      evidence.push(`\`${receiverBase}\` is assigned from \`${truncate(assignedExpr ?? "", 60)}\` on line ${assignLine.n}. If that value is a plain object at runtime, \`.${methodName}()\` will not exist on it.`);
+    }
+    evidence.push(`\`Array.prototype.${methodName}\` only works on arrays, not on plain objects. If the intent is to iterate over object entries, use \`Object.values(${receiverBase})\`, \`Object.keys(${receiverBase})\`, or \`Object.entries(${receiverBase})\` first.`);
+    if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}:${frame.col}\`.`);
+
+    // Build a fixed line that wraps the receiver in Object.values() if the usage is a simple call.
+    let fixedCode: string | undefined;
+    if (anyUsage && assignLine) {
+      const fixedLine = anyUsage.text.replace(
+        new RegExp(`\\b${escapeRegExp(receiverName)}\\.${escapeRegExp(methodName)}\\s*\\(`),
+        `Object.values(${receiverName}).${methodName}(`,
+      );
+      if (fixedLine !== anyUsage.text) {
+        fixedCode = input.code.split("\n").map((l, i) => (i === anyUsage.n - 1 ? fixedLine : l)).join("\n");
+      }
+    }
+
+    const fn = anyUsage ? findEnclosingFunction(lines, anyUsage.n) : undefined;
+    return {
+      plan: { kind: "not-a-function", fnName: fn?.name, callee },
+      result: {
+        problem: `\`${receiverName}\` is a plain object, but \`.${methodName}()\` is an Array method.`,
+        rootCause: `\`${methodName}()\` is a method on \`Array.prototype\` and does not exist on plain objects. \`${receiverBase}\`${assignLine ? ` (defined on line ${assignLine.n})` : ""} is an object, not an array, so calling \`.${methodName}()\` on it throws a TypeError.`,
+        evidence,
+        confidence: isObjectLiteral ? "High" : "Medium",
+        suggestedFix: [
+          `Option A: change \`${receiverName}\` to be an array instead of a plain object. For example, wrap the value in \`[]\` or change the data source to return an array.`,
+          `Option B: if you need to iterate over object values, use \`Object.values(${receiverName}).${methodName}(...)\` instead of \`${callee}(...)\`.`,
+          `Why it works: \`Object.values()\` converts the object's values to an array, which has all the Array prototype methods.`,
+          ...(fixedCode ? [`The suggested fix changes the call to \`Object.values(${receiverName}).${methodName}(...)\`.`] : []),
+        ].join("\n\n"),
+        testSuggestion: `Cover: passing an array (normal case — should work); passing the object that caused the error (should now work after fix); passing \`null\` or \`undefined\`.`,
+        ...(fixedCode ? { fixedCode } : {}),
+      },
+    };
+  }
+
+  // ── General case ──────────────────────────────────────────────────────────
   if (assignLine) {
-    const assignedValue = assignRe.exec(assignLine.text)?.[1] ?? "";
-    evidence.push(`\`${callee.split(".").pop()}\` is assigned from \`${truncate(assignedValue, 50)}\` on line ${assignLine.n} — check whether that expression always produces ${problem === "a function" ? "a function" : "an iterable (array, string, Map, Set, etc.)"}.`);
+    evidence.push(`\`${receiverBase}\` is assigned from \`${truncate(assignedExpr ?? "", 50)}\` on line ${assignLine.n} — check whether that expression always produces ${problem === "a function" ? "a function" : "an iterable (array, string, Map, Set, etc.)"}.`);
   } else if (problem === "a function") {
     evidence.push(`No assignment for \`${callee}\` was found in the pasted code. It may come from an import, a parameter, or an object property — check that the source always exports a function.`);
   }
@@ -954,6 +1152,261 @@ function analyzeAsyncAwaitForgotten(input: InvestigationInput, combined: string)
         `Tip: if you cannot use \`async/await\` in the calling context, use \`.then(result => { /* use result here */ })\` instead.`,
       ].join("\n\n"),
       testSuggestion: `Cover: awaiting the result produces the expected value (normal case); not awaiting gives a \`Promise\` object (verify the type is correct after the fix); and error handling when the promise rejects.`,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pattern 11: Network / fetch failure
+// ---------------------------------------------------------------------------
+
+function analyzeNetworkFailure(input: InvestigationInput, combined: string): Analysis | null {
+  const isNetworkError =
+    /TypeError:\s*(?:Failed to fetch|NetworkError|Load failed|Network request failed)/i.test(combined) ||
+    /net::ERR_[A-Z_]+/i.test(combined) ||
+    /CORS|Access-Control-Allow-Origin/i.test(combined) ||
+    /ERR_NETWORK_CHANGED|ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED/i.test(combined);
+
+  if (!isNetworkError) return null;
+
+  const lines = toLines(input.code);
+  const headline = firstLine(input.error);
+  const frame = parseStackFrame(input.stackTrace ?? combined);
+
+  const isCORS = /CORS|Access-Control-Allow-Origin/i.test(combined);
+  const isConnectionRefused = /ERR_CONNECTION_REFUSED|ECONNREFUSED/i.test(combined);
+  const isNameNotResolved = /ERR_NAME_NOT_RESOLVED|ENOTFOUND/i.test(combined);
+
+  // Find the fetch/axios/XMLHttpRequest call in the code.
+  const fetchLine =
+    lines.find((l) => /\bfetch\s*\(/.test(l.text)) ??
+    lines.find((l) => /axios\s*\.\s*(?:get|post|put|delete|patch|request)\s*\(/.test(l.text)) ??
+    lines.find((l) => /new\s+XMLHttpRequest\s*\(/.test(l.text));
+
+  // Extract the URL from the fetch call if visible.
+  const urlMatch = fetchLine ? /fetch\s*\(\s*(['"`])([^'"`]+)\1/.exec(fetchLine.text) : null;
+  const url = urlMatch?.[2];
+
+  const evidence: string[] = [`The error message reads: \`${truncate(headline, 90)}\`.`];
+
+  if (isCORS) {
+    evidence.push(`The error mentions CORS (Cross-Origin Resource Sharing). Browsers block requests from one origin (domain/protocol/port) to another unless the server explicitly allows it with the \`Access-Control-Allow-Origin\` header.`);
+    if (url) evidence.push(`The request is made to \`${url}\`. If this origin differs from the page's origin, the server must include CORS headers in its response.`);
+    if (fetchLine) evidence.push(`Line ${fetchLine.n} (\`${truncate(fetchLine.text)}\`) makes the request that was blocked.`);
+    evidence.push(`CORS errors only appear in browsers, not in Node.js. The server-side code or server configuration controls whether CORS is allowed.`);
+  } else if (isConnectionRefused) {
+    evidence.push(`\`ERR_CONNECTION_REFUSED\` means the server actively refused the connection. The server is either not running, listening on a different port, or blocked by a firewall.`);
+    if (url) evidence.push(`The request target is \`${url}\`. Check that the server is running and listening at that address and port.`);
+    if (fetchLine) evidence.push(`Line ${fetchLine.n} (\`${truncate(fetchLine.text)}\`) makes the failing request.`);
+  } else if (isNameNotResolved) {
+    evidence.push(`\`ERR_NAME_NOT_RESOLVED\` means the DNS lookup for the hostname failed — the domain could not be resolved to an IP address.`);
+    if (url) evidence.push(`The request target is \`${url}\`. Check that the hostname is spelled correctly and that the machine has internet access.`);
+    if (fetchLine) evidence.push(`Line ${fetchLine.n} (\`${truncate(fetchLine.text)}\`) makes the failing request.`);
+  } else {
+    evidence.push(`A network error means the request could not be completed at the transport level — the browser or Node.js could not reach the server.`);
+    if (fetchLine) evidence.push(`Line ${fetchLine.n} (\`${truncate(fetchLine.text)}\`) makes the failing request.`);
+    if (url) evidence.push(`The request target is \`${url}\`.`);
+    evidence.push(`Common causes: no internet connection, the server is down, a proxy is blocking the request, or the URL is incorrect.`);
+  }
+  if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}:${frame.col}\`.`);
+
+  const fnName = fetchLine ? findEnclosingFunction(lines, fetchLine.n)?.name : undefined;
+
+  // Check whether the code has error handling around the fetch call.
+  const hasErrorHandling =
+    /\.catch\s*\(/.test(input.code) ||
+    /try\s*\{/.test(input.code);
+  if (!hasErrorHandling) {
+    evidence.push(`The pasted code does not appear to have a \`try/catch\` or \`.catch()\` around the network call. Unhandled network errors will crash the calling code.`);
+  }
+
+  return {
+    plan: { kind: "generic", fnName },
+    result: {
+      problem: isCORS
+        ? `The browser blocked the request due to a CORS policy violation.`
+        : isConnectionRefused
+          ? `The server refused the connection — it may not be running.`
+          : `The network request could not reach the server.`,
+      rootCause: isCORS
+        ? `The server at the target origin does not include the \`Access-Control-Allow-Origin\` header (or its value does not include the current page's origin), so the browser refuses to deliver the response. CORS is enforced by the browser; the server must be configured to allow the request.`
+        : isConnectionRefused
+          ? `The target server is not accepting connections on the requested address and port. The server may be stopped, the port may be wrong, or a firewall is blocking the connection.`
+          : isNameNotResolved
+            ? `The hostname in the URL cannot be resolved by DNS. The domain name is either misspelled, not registered, or the machine has no internet access.`
+            : `The network request failed before receiving a response. This is a transport-level failure, not an error returned by the server.`,
+      evidence,
+      confidence: isCORS || isConnectionRefused || isNameNotResolved ? "High" : "Medium",
+      suggestedFix: isCORS
+        ? [
+            `Fix CORS on the server: add the \`Access-Control-Allow-Origin: <your-origin>\` header to the server's response (or \`*\` for public APIs).`,
+            `During development: use a proxy (e.g. Next.js rewrites, Vite proxy config) to forward requests from the same origin.`,
+            `This cannot be fixed in browser JavaScript — the server must send the correct headers.`,
+          ].join("\n\n")
+        : isConnectionRefused
+          ? [
+              `Verify the server is running and listening on the correct port.`,
+              `Check the URL in the fetch call: make sure the hostname, port, and protocol match the running server.`,
+              `If the server is a local dev server, start it first (e.g. \`npm run dev\`).`,
+            ].join("\n\n")
+          : [
+              `Wrap the fetch call in a \`try/catch\` block so network failures are handled gracefully instead of crashing the app.`,
+              `Verify the URL is correct and the server is reachable from the current environment.`,
+              `Add retry logic or a user-facing error message for when the network is unavailable.`,
+            ].join("\n\n"),
+      testSuggestion: `Mock the fetch/network layer in tests (e.g. \`vi.stubGlobal("fetch", ...)\` or \`nock\`): cover a successful response, a network failure (should be caught gracefully), and ${isCORS ? "a CORS-blocked response" : "a timeout"}.`,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pattern 12: Unhandled promise rejection
+// ---------------------------------------------------------------------------
+
+function analyzeUnhandledRejection(input: InvestigationInput, combined: string): Analysis | null {
+  const isUnhandled =
+    /UnhandledPromiseRejection/i.test(combined) ||
+    /Unhandled promise rejection/i.test(combined) ||
+    /UnhandledPromiseRejectionWarning/i.test(combined) ||
+    /Promise rejection was handled late/i.test(combined);
+
+  if (!isUnhandled) return null;
+
+  const lines = toLines(input.code);
+  const headline = firstLine(input.error);
+  const frame = parseStackFrame(input.stackTrace ?? combined);
+
+  // Extract the inner error message from the rejection if present.
+  const innerError = /UnhandledPromiseRejection.*?:\s*(.+)/.exec(combined)?.[1]?.trim() ??
+    /Unhandled promise rejection\s*:?\s*(.+)/i.exec(combined)?.[1]?.trim();
+
+  // Find async operations in the code.
+  const asyncLines = lines.filter((l) => /\bawait\s+/.test(l.text) || /\.then\s*\(/.test(l.text) || /new\s+Promise\s*\(/.test(l.text));
+  const hasCatch = /\.catch\s*\(/.test(input.code) || /catch\s*\(/.test(input.code);
+
+  const evidence: string[] = [`The error message reads: \`${truncate(headline, 90)}\`.`];
+  if (innerError && innerError !== headline) {
+    evidence.push(`The rejected Promise carries the inner error: \`${truncate(innerError, 90)}\`.`);
+  }
+  evidence.push(`An \`UnhandledPromiseRejection\` means a Promise was rejected but no \`.catch()\` handler or \`try/catch\` block was in place to handle the rejection. In Node.js 15+ this terminates the process.`);
+
+  if (asyncLines.length > 0 && !hasCatch) {
+    evidence.push(`The pasted code has ${asyncLines.length} async operation${asyncLines.length > 1 ? "s" : ""} (line${asyncLines.length > 1 ? "s" : ""} ${asyncLines.map((l) => l.n).join(", ")}) but no visible \`.catch()\` or \`try/catch\` block.`);
+  } else if (!hasCatch) {
+    evidence.push(`No \`.catch()\` or \`try/catch\` was found in the pasted code. Every \`await\` expression and \`.then()\` chain should have an error handler.`);
+  } else {
+    evidence.push(`A \`.catch()\` or \`try/catch\` exists in the pasted code, but the rejection reached an uncaught path. Check that every async code path is covered.`);
+  }
+  if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}:${frame.col}\`.`);
+
+  const fnName = asyncLines[0] ? findEnclosingFunction(lines, asyncLines[0].n)?.name : undefined;
+
+  return {
+    plan: { kind: "generic", fnName },
+    result: {
+      problem: `A Promise was rejected without a handler, causing an unhandled rejection.`,
+      rootCause: innerError
+        ? `A Promise rejected with \`${truncate(innerError, 80)}\` was never caught. In Node.js 15+ and modern browsers, unhandled rejections terminate the process or generate a loud warning.`
+        : `A Promise was rejected but no \`.catch()\` handler or \`try/catch\` was present on that code path. The rejection propagated to the top level, causing an \`UnhandledPromiseRejection\`.`,
+      evidence,
+      confidence: "High",
+      suggestedFix: [
+        `Wrap every \`await\` call in a \`try/catch\` block, or add a \`.catch()\` handler to every \`.then()\` chain.`,
+        `Why it works: the rejection is intercepted before it reaches the top level, so the process does not crash.`,
+        `Example:\n\`\`\`\ntry {\n  const result = await someAsyncOperation();\n} catch (err) {\n  console.error("Operation failed:", err);\n  // handle or re-throw\n}\n\`\`\``,
+        `If you intentionally do not need the result, still add \`.catch(() => {})\` or \`void yourPromise.catch(err => log(err))\` to suppress the warning.`,
+      ].join("\n\n"),
+      testSuggestion: `Cover: the async function resolving successfully (normal case); the async function rejecting (should be caught without crashing); and the rejection carrying a specific error message that can be asserted.`,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pattern 13: Logic / wrong-operator error
+// ---------------------------------------------------------------------------
+
+function analyzeLogicError(input: InvestigationInput, combined: string): Analysis | null {
+  const lines = toLines(input.code);
+  const headline = firstLine(input.error);
+
+  // Only engage when the error is generic enough that a logic mistake is plausible.
+  // We look for structural clues in the code itself.
+  const isGenericError = /^Error:/i.test(headline) || /assertion/i.test(headline) || /expected.*received/i.test(combined);
+  if (!isGenericError && !/NaN/i.test(combined) && !/Infinity/i.test(combined)) return null;
+
+  const evidence: string[] = [`The error message reads: \`${truncate(headline, 90)}\`.`];
+  const suspects: string[] = [];
+
+  // ── NaN propagation ──────────────────────────────────────────────────────
+  const hasNaN = /\bNaN\b/.test(combined);
+  if (hasNaN) {
+    evidence.push(`\`NaN\` (Not a Number) appears in the error. \`NaN\` propagates silently through arithmetic: any operation on \`NaN\` returns \`NaN\`. This is usually caused by parsing a non-numeric string with \`parseInt\`/\`parseFloat\`, dividing by zero, or applying math to \`undefined\`.`);
+    const nanLines = lines.filter((l) => /\bparseInt\b|\bparseFloat\b|\bNumber\s*\(/.test(l.text) || /[+\-*/]\s*\bundefined\b/.test(l.text));
+    for (const l of nanLines.slice(0, 2)) {
+      evidence.push(`Line ${l.n} (\`${truncate(l.text)}\`) performs a numeric operation or conversion that could produce \`NaN\` if the input is not a valid number.`);
+    }
+    suspects.push("NaN");
+  }
+
+  // ── Assignment used as condition (= vs ==) ────────────────────────────────
+  const assignInCondition = lines.find((l) => /\bif\s*\([^=!<>]+=[^=]/.test(l.text) && !/=>/g.test(l.text));
+  if (assignInCondition) {
+    evidence.push(`Line ${assignInCondition.n} (\`${truncate(assignInCondition.text)}\`) uses a single \`=\` inside an \`if\` condition. This is an assignment, not a comparison. The condition will always be truthy (unless the assigned value is falsy), which is almost always a bug. Use \`===\` to compare.`);
+    suspects.push("assignment-in-condition");
+  }
+
+  // ── Division by zero ─────────────────────────────────────────────────────
+  const divByZeroLine = lines.find((l) => /\/\s*0\b/.test(l.text) && !/\/\//.test(l.text.slice(0, l.text.indexOf("/0"))));
+  if (divByZeroLine) {
+    evidence.push(`Line ${divByZeroLine.n} (\`${truncate(divByZeroLine.text)}\`) divides by the literal \`0\`. In JavaScript this produces \`Infinity\` or \`NaN\`, not a thrown error, but the downstream calculation will produce wrong results.`);
+    suspects.push("divide-by-zero");
+  }
+
+  // ── Off-by-one: comparing length with <= instead of < (or vice versa) ────
+  const offByOne = lines.find((l) => /\[\s*[\w.]+\s*\.\s*length\s*\]/.test(l.text));
+  if (offByOne) {
+    evidence.push(`Line ${offByOne.n} (\`${truncate(offByOne.text)}\`) accesses an array using \`.length\` as the index. Arrays are zero-indexed, so the last element is at index \`length - 1\`. Accessing \`arr[arr.length]\` returns \`undefined\`.`);
+    suspects.push("off-by-one");
+  }
+
+  // ── Loose equality with null/undefined (== instead of ===) ───────────────
+  const looseNull = lines.find((l) => /[^=!]==[^=]/.test(l.text) && /null|undefined/.test(l.text));
+  if (looseNull) {
+    evidence.push(`Line ${looseNull.n} (\`${truncate(looseNull.text)}\`) uses \`==\` with \`null\` or \`undefined\`. While \`== null\` catches both \`null\` and \`undefined\`, use \`=== null\` and \`=== undefined\` explicitly for clarity and to avoid unexpected coercions.`);
+    suspects.push("loose-equality");
+  }
+
+  // Only return if at least one concrete logic suspect was found.
+  if (suspects.length === 0) return null;
+
+  const frame = parseStackFrame(input.stackTrace ?? combined);
+  if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}:${frame.col}\`.`);
+
+  const fnName = findEnclosingFunction(lines, lines.length)?.name;
+
+  const fixParts: string[] = [];
+  if (suspects.includes("NaN")) fixParts.push(`Validate numeric inputs before performing arithmetic. Use \`Number.isNaN()\` or \`Number.isFinite()\` to guard against \`NaN\` and \`Infinity\`. Use \`Number(x)\` with a fallback: \`const n = Number(x); if (Number.isNaN(n)) throw new Error("Expected a number");\``);
+  if (suspects.includes("assignment-in-condition")) fixParts.push(`Change \`=\` to \`===\` in the \`if\` condition on line ${assignInCondition!.n} to compare instead of assign.`);
+  if (suspects.includes("divide-by-zero")) fixParts.push(`Guard against a zero divisor before the division on line ${divByZeroLine!.n}: \`if (denominator === 0) throw new Error("Cannot divide by zero");\``);
+  if (suspects.includes("off-by-one")) fixParts.push(`Use \`arr[arr.length - 1]\` to access the last element, not \`arr[arr.length]\`.`);
+  if (suspects.includes("loose-equality")) fixParts.push(`Replace \`== null\` with explicit \`=== null || === undefined\` checks, or use the intentional \`== null\` idiom only when you deliberately want to catch both.`);
+
+  return {
+    plan: { kind: "generic", fnName },
+    result: {
+      problem: `A logic error was detected in the code: ${suspects.join(", ")}.`,
+      rootCause: `The code contains a logic mistake that produces incorrect results or throws: ${suspects.map((s) => {
+        if (s === "NaN") return "a \`NaN\` value propagates through arithmetic because a numeric conversion produced a non-number";
+        if (s === "assignment-in-condition") return `an assignment (\`=\`) is used inside an \`if\` condition instead of a comparison (\`===\`)`;
+        if (s === "divide-by-zero") return "a literal \`0\` is used as a divisor";
+        if (s === "off-by-one") return "an array is accessed at index \`.length\` (one past the end)";
+        if (s === "loose-equality") return "\`==\` is used with \`null\`/\`undefined\` where \`===\` was likely intended";
+        return s;
+      }).join("; ")}.`,
+      evidence,
+      confidence: suspects.length > 0 ? "Medium" : "Low",
+      suggestedFix: fixParts.join("\n\n"),
+      testSuggestion: `Cover: a normal input that produces the correct result; the input that triggered the error; and boundary values (zero, empty, \`null\`, \`NaN\`).`,
     },
   };
 }

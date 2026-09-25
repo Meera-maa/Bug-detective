@@ -290,3 +290,219 @@ describe("pattern: X is not iterable", () => {
     expect(parseGeneratedTest(buildTest(input, result, plan)).ok).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tests for the 6 required new bug categories
+// ---------------------------------------------------------------------------
+
+describe("category: invalid JSON / HTML response from server", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: `SyntaxError: Unexpected token '<', "<!DOCTYPE "... is not valid JSON`,
+    code: `async function loadUsers() {
+  const response = await fetch("/api/users");
+  const data = await response.json();
+  return data.users;
+}`,
+  };
+  const { result } = analyze(input);
+
+  it("identifies the HTML-instead-of-JSON cause", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.problem).toMatch(/html|json/i);
+    expect(result.rootCause.toLowerCase()).toMatch(/html|<!doctype|server/);
+  });
+
+  it("reports High confidence", () => {
+    expect(result.confidence).toBe("High");
+  });
+
+  it("quotes the fetch/json line as evidence", () => {
+    expect(result.evidence.some((e) => /response\.json|fetch/i.test(e))).toBe(true);
+  });
+
+  it("explains what '<' means (first byte of HTML)", () => {
+    expect(result.evidence.some((e) => /</.test(e) || /HTML/i.test(e))).toBe(true);
+  });
+
+  it("suggests checking response.ok before parsing", () => {
+    expect(result.suggestedFix.toLowerCase()).toMatch(/response\.ok|status|2xx/i);
+  });
+
+  it("provides a fixedCode that guards response.ok", () => {
+    expect(result.fixedCode).toBeTruthy();
+    expect(result.fixedCode).toContain("response.ok");
+  });
+});
+
+describe("category: .filter() called on a plain object (Array method on non-array)", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "TypeError: users.filter is not a function",
+    code: `function getActiveUsers(users) {
+  return users.filter(user => user.active);
+}
+
+const users = {
+  name: "Meera",
+  active: true
+};
+
+console.log(getActiveUsers(users));`,
+  };
+  const { result } = analyze(input);
+
+  it("identifies that users is an object, not an array", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.problem).toMatch(/object|filter/i);
+    expect(result.rootCause.toLowerCase()).toMatch(/object|array/);
+  });
+
+  it("reports Medium or High confidence", () => {
+    expect(["Medium", "High"]).toContain(result.confidence);
+  });
+
+  it("explains that .filter is an Array method", () => {
+    expect(
+      result.evidence.some((e) => /Array\.prototype\.filter|array.*method|only works on array/i.test(e))
+    ).toBe(true);
+  });
+
+  it("points to the object literal declaration as evidence", () => {
+    expect(result.evidence.some((e) => /plain object|object.*line|line.*object/i.test(e))).toBe(true);
+  });
+
+  it("suggests Object.values() as a fix", () => {
+    expect(result.suggestedFix).toContain("Object.values");
+  });
+});
+
+describe("category: network / fetch failure — CORS", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "TypeError: Failed to fetch\nAccess to fetch at 'https://api.example.com/data' from origin 'http://localhost:3000' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.",
+    code: `async function getData() {
+  const response = await fetch("https://api.example.com/data");
+  return response.json();
+}`,
+  };
+  const { result } = analyze(input);
+
+  it("identifies the CORS error", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.problem.toLowerCase()).toMatch(/cors|browser blocked/i);
+    expect(result.rootCause.toLowerCase()).toMatch(/cors|access-control/i);
+  });
+
+  it("reports High confidence for CORS", () => {
+    expect(result.confidence).toBe("High");
+  });
+
+  it("explains what CORS is and where the fix must be", () => {
+    expect(result.evidence.some((e) => /Access-Control-Allow-Origin|server/i.test(e))).toBe(true);
+    expect(result.suggestedFix.toLowerCase()).toMatch(/server|header/i);
+  });
+
+  it("points to the fetch line as evidence", () => {
+    expect(result.evidence.some((e) => /fetch|line 2/i.test(e))).toBe(true);
+  });
+});
+
+describe("category: network / fetch failure — connection refused", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "TypeError: Failed to fetch\nnet::ERR_CONNECTION_REFUSED",
+    code: `async function ping() {
+  const res = await fetch("http://localhost:8080/health");
+  return res.json();
+}`,
+  };
+  const { result } = analyze(input);
+
+  it("identifies the connection-refused cause", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.rootCause.toLowerCase()).toMatch(/refused|not running|server/i);
+  });
+
+  it("reports High confidence", () => {
+    expect(result.confidence).toBe("High");
+  });
+});
+
+describe("category: promise rejection — unhandled", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "UnhandledPromiseRejectionWarning: Error: Database connection failed",
+    code: `async function saveRecord(data) {
+  const result = await db.insert(data);
+  return result.id;
+}
+
+saveRecord({ name: "Meera" });`,
+  };
+  const { result } = analyze(input);
+
+  it("identifies the unhandled rejection", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.problem.toLowerCase()).toMatch(/rejected|rejection|promise/i);
+    expect(result.rootCause.toLowerCase()).toMatch(/catch|handler|rejected/i);
+  });
+
+  it("reports High confidence", () => {
+    expect(result.confidence).toBe("High");
+  });
+
+  it("includes evidence about the inner error", () => {
+    expect(result.evidence.some((e) => /Database connection failed/i.test(e))).toBe(true);
+  });
+
+  it("recommends try/catch or .catch()", () => {
+    expect(result.suggestedFix.toLowerCase()).toMatch(/try.*catch|\.catch/i);
+  });
+});
+
+describe("category: logic / NaN propagation", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "Error: Expected a valid price, got NaN",
+    code: `function calculateTotal(price, quantity) {
+  const total = parseInt(price) * quantity;
+  return total;
+}`,
+  };
+  const { result } = analyze(input);
+
+  it("identifies the NaN logic error", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.evidence.some((e) => /NaN|numeric|parseInt/i.test(e))).toBe(true);
+    expect(result.rootCause.toLowerCase()).toMatch(/nan|numeric|number/i);
+  });
+
+  it("points to parseInt as a possible NaN source", () => {
+    expect(result.evidence.some((e) => /parseInt|line \d/i.test(e))).toBe(true);
+  });
+
+  it("recommends validating numeric inputs", () => {
+    expect(result.suggestedFix.toLowerCase()).toMatch(/nan|number\.isnan|validate/i);
+  });
+});
+
+describe("category: off-by-one (arr[arr.length])", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "Error: last item is undefined",
+    code: `function getLastItem(arr) {
+  return arr[arr.length];
+}`,
+  };
+  const { result } = analyze(input);
+
+  it("detects the off-by-one array access", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.evidence.some((e) => /arr\.length|length.*index|off.by.one|length - 1/i.test(e))).toBe(true);
+  });
+
+  it("suggests arr[arr.length - 1]", () => {
+    expect(result.suggestedFix).toContain("length - 1");
+  });
+});

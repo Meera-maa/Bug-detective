@@ -104,13 +104,25 @@ The built-in analyzer handles these JavaScript/TypeScript patterns out of the bo
 | 4 | Empty string/array indexed with `[0]` (e.g. `getInitials("")`) | High |
 | 5 | `ReferenceError: x is not defined` | High |
 | 6 | `SyntaxError` — unexpected token / missing bracket or brace | Medium |
+| 6a | `SyntaxError` from `response.json()` receiving HTML — server returned an error page instead of JSON | **High** |
 | 7 | `RangeError: Maximum call stack size exceeded` (infinite recursion) | High |
 | 8 | `RangeError: Invalid array length` | Medium |
 | 9 | `X is not a function` / `X is not iterable` | Medium–High |
+| 9a | Array method (`.filter`, `.map`, etc.) called on a plain object — detects object literal and suggests `Object.values()` | **High** |
 | 10 | Missing `return` — caller reads a property on `undefined` | Medium |
-| 11 | `async`/`await` forgotten — Promise used as a plain value | Medium–High |
+| 11 | Unhandled Promise rejection (`UnhandledPromiseRejectionWarning`) — missing `.catch()` or `try/catch` | **High** |
+| 12 | `async`/`await` forgotten — Promise used as a plain value | Medium–High |
+| 13 | Network/fetch failure — `TypeError: Failed to fetch`, CORS, `ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED` | High |
+| 14 | Logic errors — `NaN` propagation, `=` in `if` condition, division by zero, off-by-one (`arr[arr.length]`) | Medium |
 
-For anything else the analyzer still runs: it reports `Low` confidence, quotes every clue it can find in the pasted input, and gives actionable steps — it just does not fabricate a root cause it cannot prove.
+**For everything else**, the fallback analyzer still runs. It does not say "I can't help" — instead it:
+- Reads the error type (`TypeError`, `EvalError`, HTTP status codes, etc.) and classifies it
+- Quotes the exact line from the stack trace if one is pasted
+- Quotes code lines that mention identifiers from the error message
+- Gives a specific, targeted suggested fix based on the error class and the pinpointed code
+- Reports `Low` confidence only when none of the above applies — and explains what additional information would sharpen the diagnosis
+
+It never fabricates a root cause it cannot point to in the pasted input.
 
 ## Honest limitations
 
