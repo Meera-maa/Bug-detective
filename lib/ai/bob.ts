@@ -50,6 +50,7 @@ function parseReply(reply: string): unknown {
  * Throw ProviderUnavailableError if the service cannot be reached or is not configured.
  * Keep credentials in server-side environment variables only (never NEXT_PUBLIC_*).
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function askBob(_prompt: string): Promise<string> {
   throw new ProviderUnavailableError(
     "IBM Bob is the development agent for this project, not a runtime API. " +

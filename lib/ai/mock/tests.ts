@@ -142,6 +142,78 @@ export function buildTest(input: InvestigationInput, result: InvestigationResult
       };
     }
 
+    case "not-a-function": {
+      const fnName = plan.fnName ?? "yourFunction";
+      const { callee } = plan;
+      const cases: Case[] = [
+        {
+          title: `does not throw when ${callee} is a valid function (normal case)`,
+          body: [
+            `const validFn = () => "ok"; // TODO: replace with the real expected value`,
+            `expect(() => ${fnName}(validFn)).not.toThrow();`,
+          ],
+        },
+        {
+          title: `throws (or guards) when ${callee} is undefined`,
+          body: [`expect(() => ${fnName}(undefined)).not.toThrow();`],
+        },
+        {
+          title: `throws (or guards) when ${callee} is null`,
+          body: [`expect(() => ${fnName}(null)).not.toThrow();`],
+        },
+        {
+          title: `throws (or guards) when ${callee} is a non-function value`,
+          body: [
+            `// A plain object is not callable`,
+            `expect(() => ${fnName}({})).not.toThrow();`,
+          ],
+        },
+      ];
+      return {
+        framework,
+        filename: `${fnName}.test.${ext}`,
+        code: render(fnName, result.problem, ext, cases),
+        covers: ["Valid function value (normal case)", "undefined value", "null value", "Non-function value (the bug)"],
+      };
+    }
+
+    case "stack-overflow": {
+      const { fnName } = plan;
+      const cases: Case[] = [
+        {
+          title: "does not throw for the base case",
+          body: [
+            `// TODO: replace with the smallest input that should return directly (base case)`,
+            `const baseCase = undefined; // e.g. 0, "", [], null`,
+            `expect(() => ${fnName}(baseCase)).not.toThrow();`,
+          ],
+        },
+        {
+          title: "returns the expected value for a small input",
+          body: [
+            `// TODO: replace with a small valid input and its expected result`,
+            `const smallInput = undefined;`,
+            `const expected = undefined;`,
+            `expect(${fnName}(smallInput)).toEqual(expected);`,
+          ],
+        },
+        {
+          title: "does not throw for the input that triggered the crash (after the fix)",
+          body: [
+            `// TODO: paste the input that originally caused the stack overflow`,
+            `const crashInput = undefined;`,
+            `expect(() => ${fnName}(crashInput)).not.toThrow();`,
+          ],
+        },
+      ];
+      return {
+        framework,
+        filename: `${fnName}.test.${ext}`,
+        code: render(fnName, result.problem, ext, cases),
+        covers: ["Base case (must not recurse)", "Small valid input", "Input that triggered the crash"],
+      };
+    }
+
     case "generic": {
       const fnName = plan.fnName ?? "yourFunction";
       const code = [

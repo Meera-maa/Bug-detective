@@ -73,16 +73,16 @@ No credentials are needed. The app uses a built-in, rule-based analyzer (`AI_PRO
 ```
 Next.js UI → /api/investigate → getProvider() → analyzer
                                    ↓
-                        validate (lib/validate.ts) → UI
+                         validate (lib/validate.ts) → UI
 ```
 
 - `lib/ai/provider.ts`: the `AIProvider` interface every analyzer implements
 - `lib/ai/index.ts`: the single place that picks the analyzer
-- `lib/ai/mock/`: the built-in offline analyzer
-- `lib/ai/bob.ts`: an **unconnected** slot for an external AI provider. It is not used by the app today.
+- `lib/ai/mock/`: the built-in offline analyzer (the demo provider)
+- `lib/ai/bob.ts`: a reserved slot for a future callable IBM AI API. IBM Bob 2.0 was used as the **development agent** to build this project; it is not a runtime API the app calls.
 - `lib/validate.ts`: every analyzer reply is validated before it reaches the UI
 - `lib/runner/`: the sandboxed Web Worker that runs JavaScript tests
-- `tests/`: automated tests for the demos and for malformed or empty input
+- `tests/`: automated tests for the demos, new patterns, and malformed or empty input
 
 ## Demo bugs (one click on the home page)
 
@@ -92,10 +92,30 @@ Next.js UI → /api/investigate → getProvider() → analyzer
 
 Each goes Error → Root cause → Evidence → Fix → Test → Run (fails on the original code, passes on the fix).
 
+## Recognised bug patterns
+
+The built-in analyzer handles these JavaScript/TypeScript patterns out of the box:
+
+| # | Pattern | Confidence |
+|---|---|---|
+| 1 | Reading a property of `undefined`/`null` — simple variable | High |
+| 2 | Reading a property of `undefined`/`null` — chained path | Medium |
+| 3 | API response shape mismatch (pasted JSON compared against code) | High |
+| 4 | Empty string/array indexed with `[0]` (e.g. `getInitials("")`) | High |
+| 5 | `ReferenceError: x is not defined` | High |
+| 6 | `SyntaxError` — unexpected token / missing bracket or brace | Medium |
+| 7 | `RangeError: Maximum call stack size exceeded` (infinite recursion) | High |
+| 8 | `RangeError: Invalid array length` | Medium |
+| 9 | `X is not a function` / `X is not iterable` | Medium–High |
+| 10 | Missing `return` — caller reads a property on `undefined` | Medium |
+| 11 | `async`/`await` forgotten — Promise used as a plain value | Medium–High |
+
+For anything else the analyzer still runs: it reports `Low` confidence, quotes every clue it can find in the pasted input, and gives actionable steps — it just does not fabricate a root cause it cannot prove.
+
 ## Honest limitations
 
-- The analyzer is **rule-based**, not a language model. It is strong on the demo bugs and common JavaScript/TypeScript errors.
-- Python and Java errors are not analyzed yet. The app says so.
+- The analyzer is **rule-based**, not a language model. It is accurate on the patterns above.
+- Python and Java errors are reported honestly at `Low` confidence with the clues found in the input. The app says the built-in analyzer does not understand those languages.
 - **Run Test** executes JavaScript only. Other languages get a "run locally" state.
 
 ## Roadmap

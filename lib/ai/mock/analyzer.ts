@@ -13,6 +13,15 @@ import { escapeRegExp, findJsonObject, firstLine } from "./text";
  *   2. The same error caused by an API response with a different shape than the code expects
  *   3. Empty input (empty string / empty array) that is indexed with [0]
  *   4. ReferenceError: x is not defined
+ *   5. SyntaxError (unexpected token / missing bracket/comma/etc.)
+ *   6. RangeError: Maximum call stack size exceeded (infinite recursion)
+ *   7. RangeError: Invalid array length (negative or non-integer size)
+ *   8. "X is not a function" / "X is not iterable" (wrong-type call)
+ *   9. Missing return — function silently returns undefined and caller reads a property
+ *  10. async/await forgotten — Promise used as a plain value ("then is not a function" etc.)
+ *
+ * Fallback: analyzeGeneric runs for everything else. It quotes real evidence from the input
+ * but does not fabricate a root cause it cannot prove.
  */
 
 // ---------------------------------------------------------------------------
@@ -32,6 +41,8 @@ export type TestPlan =
     }
   | { kind: "empty-input"; fnName: string; param: string; fallback: string; template: "initials" | "generic" }
   | { kind: "empty-collection"; fnName: string; param: string; prop: string; returnsProp: boolean }
+  | { kind: "not-a-function"; fnName?: string; callee: string }
+  | { kind: "stack-overflow"; fnName: string }
   | { kind: "generic"; fnName?: string };
 
 export type Analysis = { result: InvestigationResult; plan: TestPlan };
@@ -134,6 +145,19 @@ export function analyze(input: InvestigationInput): Analysis {
       const found = analyzeReferenceError(input, combined, ref[1]);
       if (found) return found;
     }
+    // Patterns 5-10: additional JS/TS patterns
+    const synFound = analyzeSyntaxError(input, combined);
+    if (synFound) return synFound;
+    const stackFound = analyzeStackOverflow(input, combined);
+    if (stackFound) return stackFound;
+    const rangeFound = analyzeInvalidArrayLength(input, combined);
+    if (rangeFound) return rangeFound;
+    const notFnFound = analyzeNotAFunction(input, combined);
+    if (notFnFound) return notFnFound;
+    const asyncFound = analyzeAsyncAwaitForgotten(input, combined);
+    if (asyncFound) return asyncFound;
+    const returnFound = analyzeMissingReturn(input, combined);
+    if (returnFound) return returnFound;
   }
   return analyzeGeneric(input, combined, isJsLike);
 }
@@ -548,6 +572,388 @@ function analyzeGeneric(input: InvestigationInput, combined: string, isJsLike: b
       ].join("\n"),
       testSuggestion:
         "Once the cause is known, write a test that reproduces the failing input first, then confirm it passes after the fix.",
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pattern 5: SyntaxError
+// ---------------------------------------------------------------------------
+
+function analyzeSyntaxError(input: InvestigationInput, combined: string): Analysis | null {
+  if (!/SyntaxError\b/i.test(combined)) return null;
+  const lines = toLines(input.code);
+  const headline = firstLine(input.error);
+  const frame = parseStackFrame(input.stackTrace ?? combined);
+
+  // Extract what the parser found unexpected, if described.
+  const unexpected = /Unexpected (token|identifier|end of input|reserved word)\s*['"]?([^\s'"]*)?/i.exec(headline);
+  const unexpectedDesc = unexpected ? `${unexpected[1]}${unexpected[2] ? ` \`${unexpected[2]}\`` : ""}` : null;
+
+  // Try to pinpoint the line the parser complained about.
+  const targetLine = frame ? lines.find((l) => l.n === frame.line) : undefined;
+
+  const evidence: string[] = [`The error message reads: \`${truncate(headline, 90)}\`.`];
+  if (unexpectedDesc) evidence.push(`The parser reports an unexpected ${unexpectedDesc}.`);
+  if (targetLine) evidence.push(`The parser points to line ${targetLine.n}: \`${truncate(targetLine.text)}\`.`);
+
+  // Look for common structural mistakes in the code.
+  const rawCode = input.code;
+  const openBraces = (rawCode.match(/\{/g) ?? []).length;
+  const closeBraces = (rawCode.match(/\}/g) ?? []).length;
+  const openParens = (rawCode.match(/\(/g) ?? []).length;
+  const closeParens = (rawCode.match(/\)/g) ?? []).length;
+  const openBrackets = (rawCode.match(/\[/g) ?? []).length;
+  const closeBrackets = (rawCode.match(/\]/g) ?? []).length;
+
+  const braceImbalance = openBraces - closeBraces;
+  const parenImbalance = openParens - closeParens;
+  const bracketImbalance = openBrackets - closeBrackets;
+
+  let structuralHint: string | null = null;
+  if (braceImbalance !== 0) structuralHint = `The pasted code has ${Math.abs(braceImbalance)} more ${braceImbalance > 0 ? "opening" : "closing"} brace${Math.abs(braceImbalance) > 1 ? "s" : ""} (\`${braceImbalance > 0 ? "{" : "}"}\`) than ${braceImbalance > 0 ? "closing" : "opening"} ones — a missing brace is a common SyntaxError cause.`;
+  else if (parenImbalance !== 0) structuralHint = `The pasted code has ${Math.abs(parenImbalance)} more ${parenImbalance > 0 ? "opening" : "closing"} parenthes${Math.abs(parenImbalance) > 1 ? "es" : "is"} than ${parenImbalance > 0 ? "closing" : "opening"} ones.`;
+  else if (bracketImbalance !== 0) structuralHint = `The pasted code has ${Math.abs(bracketImbalance)} more ${bracketImbalance > 0 ? "opening" : "closing"} bracket${Math.abs(bracketImbalance) > 1 ? "s" : ""} (\`${bracketImbalance > 0 ? "[" : "]"}\`) than ${bracketImbalance > 0 ? "closing" : "opening"} ones.`;
+
+  if (structuralHint) evidence.push(structuralHint);
+
+  const hasTargetEvidence = targetLine !== undefined || structuralHint !== null;
+  const confidence: Confidence = hasTargetEvidence ? "Medium" : "Low";
+
+  const fnName = targetLine ? findEnclosingFunction(lines, targetLine.n)?.name : findEnclosingFunction(lines, lines.length)?.name;
+
+  const fix = [
+    "JavaScript cannot parse this code. Fix the syntax error before running it.",
+    targetLine ? `Start at line ${targetLine.n} (\`${truncate(targetLine.text)}\`) where the parser stopped.` : "Check the line the parser points to in the full stack trace.",
+    structuralHint ? structuralHint : "Look for: a missing or extra `}`, `)`, or `]`; a stray comma in an object or array literal; a reserved word used as a variable name.",
+  ].join("\n\n");
+
+  return {
+    plan: { kind: "generic", fnName },
+    result: {
+      problem: `SyntaxError: the JavaScript parser cannot read this code.`,
+      rootCause: unexpectedDesc
+        ? `The parser stopped at an unexpected ${unexpectedDesc}. This usually means a bracket, brace, parenthesis, or comma is missing or in the wrong place.`
+        : `The code contains a syntax error that prevents JavaScript from parsing it. The exact location is shown in the stack trace.`,
+      evidence,
+      confidence,
+      suggestedFix: fix,
+      testSuggestion: "Once the syntax is fixed, write a test that imports the module and calls the function — if the import succeeds, the SyntaxError is resolved.",
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pattern 6: RangeError — Maximum call stack size exceeded (infinite recursion)
+// ---------------------------------------------------------------------------
+
+function analyzeStackOverflow(input: InvestigationInput, combined: string): Analysis | null {
+  if (!/RangeError.*(?:Maximum call stack size exceeded|too much recursion|Recursion too deep)/i.test(combined)) return null;
+  const lines = toLines(input.code);
+  const frame = parseStackFrame(input.stackTrace ?? combined);
+
+  // Find the function that appears to call itself.
+  const selfCalls: Array<{ fn: FnContext; callLine: CodeLine }> = [];
+  for (const line of lines) {
+    const fn = findEnclosingFunction(lines, line.n);
+    if (fn && new RegExp(`\\b${escapeRegExp(fn.name)}\\s*\\(`).test(line.text) && line.n !== fn.signatureLine) {
+      // Only add if not already recorded for this function.
+      if (!selfCalls.some((s) => s.fn.name === fn.name)) {
+        selfCalls.push({ fn, callLine: line });
+      }
+    }
+  }
+
+  if (selfCalls.length === 0) {
+    // No obvious self-call found in the pasted snippet.
+    return null;
+  }
+
+  const { fn, callLine } = selfCalls[0];
+  const evidence: string[] = [
+    `The error \`RangeError: Maximum call stack size exceeded\` means a function kept calling itself until the engine ran out of stack frames — this is infinite recursion.`,
+    `\`${fn.name}\` calls itself on line ${callLine.n} (\`${truncate(callLine.text)}\`).`,
+  ];
+
+  // Does there appear to be any base-case guard before the recursive call?
+  const hasBaseCase = hasGuardBetween(lines, fn.signatureLine, callLine.n, fn.params[0] ?? fn.name);
+  if (hasBaseCase) {
+    evidence.push(`A conditional before line ${callLine.n} exists, but it may not cover all paths — the recursion still reaches the call.`);
+  } else {
+    evidence.push(`No conditional guard appears between line ${fn.signatureLine} and line ${callLine.n}, so every call recurses without a stopping condition.`);
+  }
+  if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}:${frame.col}\`.`);
+
+  return {
+    plan: { kind: "stack-overflow", fnName: fn.name },
+    result: {
+      problem: `\`${fn.name}\` calls itself infinitely, exhausting the call stack.`,
+      rootCause: hasBaseCase
+        ? `\`${fn.name}\` recurses on line ${callLine.n}, but the base-case condition does not cover all inputs, so the recursion never terminates for some inputs.`
+        : `\`${fn.name}\` calls itself on line ${callLine.n} with no base case, so it recurses forever for every input.`,
+      evidence,
+      confidence: "High",
+      suggestedFix: [
+        `Add (or fix) a base case in \`${fn.name}\` that returns a value directly without calling \`${fn.name}\` again.`,
+        `Why it works: the recursion terminates as soon as the base case is reached.`,
+        `Assumption: the pasted snippet is the complete function. If the recursive call is intentional and the base case is in a different part of the code, verify the condition covers all possible input values.`,
+      ].join("\n\n"),
+      testSuggestion: `Cover: a value that should hit the base case (must not throw), a value one step above the base case, and the input that triggered the crash.`,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pattern 7: RangeError — Invalid array length
+// ---------------------------------------------------------------------------
+
+function analyzeInvalidArrayLength(input: InvestigationInput, combined: string): Analysis | null {
+  if (!/RangeError.*Invalid array length/i.test(combined)) return null;
+  const lines = toLines(input.code);
+  const frame = parseStackFrame(input.stackTrace ?? combined);
+  const headline = firstLine(input.error);
+
+  // Find lines that construct an Array with a size expression.
+  const newArrayLine = lines.find((l) => /new\s+Array\s*\(/.test(l.text));
+  // Find lines that assign .length directly.
+  const lengthAssign = lines.find((l) => /\.length\s*=/.test(l.text));
+  const targetLine = newArrayLine ?? lengthAssign ?? (frame ? lines.find((l) => l.n === frame.line) : undefined);
+
+  const evidence: string[] = [`The error message reads: \`${truncate(headline, 90)}\`.`];
+  evidence.push(`JavaScript throws \`Invalid array length\` when an array is created or resized with a negative number, a non-integer, or a value larger than 2³²−2.`);
+  if (targetLine) evidence.push(`Line ${targetLine.n} (\`${truncate(targetLine.text)}\`) creates or resizes an array — this is likely where the bad length comes from.`);
+  if (frame && !targetLine) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}:${frame.col}\`.`);
+
+  const confidence: Confidence = targetLine ? "Medium" : "Low";
+  const fnName = targetLine ? findEnclosingFunction(lines, targetLine.n)?.name : undefined;
+
+  return {
+    plan: { kind: "generic", fnName },
+    result: {
+      problem: `An array is being created or resized with an invalid length value.`,
+      rootCause: targetLine
+        ? `Line ${targetLine.n} (\`${truncate(targetLine.text)}\`) passes a length to an array that is negative, non-integer, or exceeds the JavaScript array limit. Validate the length before using it.`
+        : `An array is constructed with a bad length value (negative, non-integer, or too large). Find where the length comes from and validate it before passing it to \`new Array()\` or assigning \`.length\`.`,
+      evidence,
+      confidence,
+      suggestedFix: [
+        targetLine
+          ? `Validate the length value on line ${targetLine.n} before using it. Ensure it is a non-negative integer (e.g. \`Math.max(0, Math.floor(n))\`) and within a reasonable range.`
+          : `Find where the array length value comes from and ensure it is a non-negative integer before creating or resizing the array.`,
+        `Why it works: JavaScript requires array lengths to be non-negative integers not exceeding 2³²−2.`,
+        `Assumption: the length comes from external input or a calculation. Add a guard or assertion before using it.`,
+      ].join("\n\n"),
+      testSuggestion: `Cover: a valid positive integer length (normal case), a length of 0, a negative number (the bug), a non-integer (e.g. 1.5), and a value beyond the safe limit.`,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pattern 8: X is not a function / X is not iterable
+// ---------------------------------------------------------------------------
+
+function analyzeNotAFunction(input: InvestigationInput, combined: string): Analysis | null {
+  // Match "X is not a function" or "X is not iterable"
+  const m =
+    /([A-Za-z_$][\w$.]*(?:\.[A-Za-z_$][\w$]*)*)\s+is not (a function|iterable)/i.exec(combined) ??
+    /([A-Za-z_$][\w$.]*(?:\.[A-Za-z_$][\w$]*)*) is not (a function|iterable)/i.exec(firstLine(input.error));
+  if (!m) return null;
+
+  const callee = m[1];
+  const problem = m[2].toLowerCase(); // "a function" or "iterable"
+  const lines = toLines(input.code);
+  const frame = parseStackFrame(input.stackTrace ?? combined);
+  const calleeRe = new RegExp(`\\b${escapeRegExp(callee)}\\b`);
+
+  // Find lines in the code that use the callee.
+  const usageLine = frame ? lines.find((l) => l.n === frame.line && calleeRe.test(l.text)) : undefined;
+  const anyUsage = usageLine ?? lines.find((l) => calleeRe.test(l.text));
+
+  // Find where callee was assigned or declared.
+  const assignRe = new RegExp(`(?:const|let|var)\\s+${escapeRegExp(callee.split(".").pop()!)}\\s*(?::[^=]+)?=\\s*([^;\\n]+)`);
+  const assignLine = lines.find((l) => assignRe.test(l.text));
+
+  const evidence: string[] = [
+    `The error says \`${callee}\` is not ${problem}, meaning the code tries to ${problem === "a function" ? `call \`${callee}()\`` : `iterate over \`${callee}\``} but \`${callee}\` holds a different type at runtime.`,
+  ];
+  if (anyUsage) evidence.push(`\`${callee}\` is ${problem === "a function" ? "called" : "iterated"} on line ${anyUsage.n} (\`${truncate(anyUsage.text)}\`).`);
+  if (assignLine) {
+    const assignedValue = assignRe.exec(assignLine.text)?.[1] ?? "";
+    evidence.push(`\`${callee.split(".").pop()}\` is assigned from \`${truncate(assignedValue, 50)}\` on line ${assignLine.n} — check whether that expression always produces ${problem === "a function" ? "a function" : "an iterable (array, string, Map, Set, etc.)"}.`);
+  } else if (problem === "a function") {
+    evidence.push(`No assignment for \`${callee}\` was found in the pasted code. It may come from an import, a parameter, or an object property — check that the source always exports a function.`);
+  }
+  if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}:${frame.col}\`.`);
+
+  const confidence: Confidence = anyUsage ? (assignLine ? "High" : "Medium") : "Low";
+  const fn = anyUsage ? findEnclosingFunction(lines, anyUsage.n) : undefined;
+
+  return {
+    plan: { kind: "not-a-function", fnName: fn?.name, callee },
+    result: {
+      problem: `\`${callee}\` is not ${problem} at the point it is used.`,
+      rootCause: assignLine
+        ? `\`${callee}\` is assigned from an expression that does not always produce ${problem === "a function" ? "a callable function" : "an iterable value"}. When the assignment produces the wrong type, the subsequent ${problem === "a function" ? "call" : "iteration"} throws.`
+        : `\`${callee}\` is expected to be ${problem === "a function" ? "a callable function" : "an iterable"} but holds a different type at runtime. This is often caused by a typo in a property name, a missing import, or an async function that returns a Promise instead of the expected value.`,
+      evidence,
+      confidence,
+      suggestedFix: [
+        problem === "a function"
+          ? `Check where \`${callee}\` comes from and make sure it is always a function. Common causes: a typo in the method name, reading a property that does not exist on the object (gives \`undefined\`), or forgetting \`await\` so a Promise is used as the function.`
+          : `Check where \`${callee}\` comes from and make sure it is always iterable (an array, string, Map, Set, or other iterable). Common causes: the value is \`undefined\` or \`null\`, or an \`async\` function returns a Promise instead of the array.`,
+        `Why it works: type errors like this are prevented by checking the value's type (or using TypeScript types) before the call.`,
+        `Tip: add \`console.log(typeof ${callee}, ${callee})\` on the line before the error to see what type it actually holds at runtime.`,
+      ].join("\n\n"),
+      testSuggestion: `Cover: a valid ${problem === "a function" ? "function" : "iterable"} value (normal case), \`undefined\`, \`null\`, and a wrong-type value (e.g. a number or plain object).`,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pattern 9: Missing return — function returns undefined and caller reads a property
+// ---------------------------------------------------------------------------
+
+function analyzeMissingReturn(input: InvestigationInput, combined: string): Analysis | null {
+  // Only trigger when the error is a TypeError about reading a property of undefined
+  // AND there is evidence a function call's result is used immediately.
+  const typeErr = parseTypeError(combined);
+  if (!typeErr) return null;
+  const lines = toLines(input.code);
+
+  // Find the failing property read — same logic as analyzeNullishRead entry.
+  const propRe = new RegExp(`\\.\\s*${escapeRegExp(typeErr.prop)}\\b`);
+  const frame = parseStackFrame(input.stackTrace ?? combined);
+  const stackLine = frame ? lines.find((l) => l.n === frame.line && propRe.test(l.text)) : undefined;
+  const failing = stackLine ?? lines.find((l) => propRe.test(l.text));
+  if (!failing) return null;
+
+  // The receiver must look like a function call result: someFunc(...).prop
+  const callResultRe = new RegExp(`([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\s*\\([^)]*\\)\\.${escapeRegExp(typeErr.prop)}`);
+  const callMatch = callResultRe.exec(failing.text);
+  if (!callMatch) return null;
+  const calledFn = callMatch[1];
+
+  // Find the definition of the called function in the pasted code.
+  const fnDefRe = new RegExp(`(?:function\\s+${escapeRegExp(calledFn)}\\b|(?:const|let|var)\\s+${escapeRegExp(calledFn)}\\s*=)`);
+  const defLine = lines.find((l) => fnDefRe.test(l.text));
+  if (!defLine) return null;
+
+  // Collect all return statements inside that function body.
+  const defLineN = defLine.n;
+  const fnLines = lines.filter((l) => l.n > defLineN);
+  const returnLines = fnLines.filter((l) => /^\s*return\s+/.test(l.text));
+  // Look for a code path with no return (a bare "return;" or missing return).
+  const bareReturn = fnLines.find((l) => /^\s*return\s*;/.test(l.text));
+
+  if (returnLines.length === 0 && !bareReturn) return null; // No return at all — likely a void function, not a bug we can identify here.
+  if (bareReturn === undefined && returnLines.length > 0) return null; // All returns look value-bearing; can't confirm missing return from snippet.
+
+  const evidence: string[] = [
+    `The error says \`${typeErr.prop}\` was read from \`${typeErr.nullish}\`, so the expression to the left of \`.${typeErr.prop}\` was ${typeErr.nullish} at runtime.`,
+    `Line ${failing.n} (\`${truncate(failing.text)}\`) reads \`.${typeErr.prop}\` directly from the return value of \`${calledFn}()\`.`,
+    `\`${calledFn}\` is defined at line ${defLine.n} (\`${truncate(defLine.text)}\`).`,
+    bareReturn
+      ? `Line ${bareReturn.n} has a bare \`return;\` inside \`${calledFn}\`, which returns \`undefined\`. If this path is taken, the caller receives \`undefined\` and the property read throws.`
+      : `\`${calledFn}\` has no \`return\` statement in the pasted snippet, so it implicitly returns \`undefined\`.`,
+  ];
+  if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}:${frame.col}\`.`);
+
+  const fn = findEnclosingFunction(lines, defLine.n);
+  return {
+    plan: { kind: "generic", fnName: calledFn },
+    result: {
+      problem: `\`${calledFn}\` returns \`undefined\` on some path, and the caller reads \`.${typeErr.prop}\` on that result.`,
+      rootCause: bareReturn
+        ? `\`${calledFn}\` has a bare \`return;\` on line ${bareReturn.n} that returns \`undefined\`. The caller on line ${failing.n} reads \`.${typeErr.prop}\` unconditionally, so when that path is taken the read throws.`
+        : `\`${calledFn}\` does not return a value in the pasted code, so it returns \`undefined\` implicitly. The caller reads \`.${typeErr.prop}\` on the result, which throws.`,
+      evidence,
+      confidence: "Medium",
+      suggestedFix: [
+        bareReturn
+          ? `In \`${calledFn}\`, replace the bare \`return;\` on line ${bareReturn.n} with a return value the caller can safely use (e.g. \`return null;\` or a fallback object), OR guard the caller: check that the result is not null/undefined before reading \`.${typeErr.prop}\`.`
+          : `Make sure \`${calledFn}\` returns a value on every code path. If it can legitimately return nothing, the caller on line ${failing.n} must guard against \`undefined\` before reading \`.${typeErr.prop}\`.`,
+        `Why it works: the caller only reads the property when it is known to have a value.`,
+        `Tip: TypeScript can catch this at compile time — add a return type to \`${calledFn}\` and TypeScript will flag any path that does not return a matching value.`,
+      ].join("\n\n"),
+      testSuggestion: `Cover: the input that triggers the \`${bareReturn ? "bare return" : "no return"}\` path (should not throw after the fix), a normal input with a full return value, and the case where the caller receives \`null\` or \`undefined\`.`,
+      ...(fn ? {} : {}),
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pattern 10: async/await forgotten
+// ---------------------------------------------------------------------------
+
+function analyzeAsyncAwaitForgotten(input: InvestigationInput, combined: string): Analysis | null {
+  // Signals: "then is not a function" OR using a Promise object where a value is expected,
+  // OR property read on a Promise (TypeError: Cannot read properties of undefined on something
+  // that looks like an async call result).
+  const isThenNotFn = /\.then\s+is not a function/i.test(combined);
+  const isPromiseProp = /\[object Promise\]/i.test(combined);
+
+  // Also catch the case where the error is a TypeError on a property that the code reads
+  // directly from an async function call result without await.
+  const typeErr = parseTypeError(combined);
+  const lines = toLines(input.code);
+
+  // Detect an async function call whose result is used without await.
+  // Look for: const x = someAsyncFn(...) where someAsyncFn is declared async.
+  const asyncFnNames: string[] = [];
+  for (const line of lines) {
+    const m = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*async\s*(?:function|\()/.exec(line.text)
+      ?? /^\s*(?:export\s+)?async\s+function\s+([A-Za-z_$][\w$]*)/.exec(line.text);
+    if (m) asyncFnNames.push(m[1]);
+  }
+
+  if (!isThenNotFn && !isPromiseProp && asyncFnNames.length === 0) return null;
+
+  // Find a line that calls an async function without await.
+  let suspectLine: CodeLine | undefined;
+  let suspectFn: string | undefined;
+  for (const fnName of asyncFnNames) {
+    const callRe = new RegExp(`(?<!await\\s{0,10})(?<![Aa]wait\\s)\\b${escapeRegExp(fnName)}\\s*\\(`);
+    const hit = lines.find((l) => callRe.test(l.text) && !/^\s*(?:async\s+)?function|const|let|var/.test(l.text));
+    if (hit) { suspectLine = hit; suspectFn = fnName; break; }
+  }
+
+  if (!isThenNotFn && !isPromiseProp && !suspectLine) return null;
+
+  const evidence: string[] = [];
+  if (isThenNotFn) evidence.push(`The error says \`.then\` is not a function. This often happens when \`.then()\` is called on a value that is already resolved — usually because \`await\` was used where it should not be, or the function does not return a Promise.`);
+  if (isPromiseProp) evidence.push(`The string \`[object Promise]\` appears in the error, which means a Promise object was used as if it were its resolved value.`);
+  if (suspectLine && suspectFn) {
+    evidence.push(`\`${suspectFn}\` is declared \`async\` in the pasted code but is called on line ${suspectLine.n} (\`${truncate(suspectLine.text)}\`) without \`await\`. Without \`await\`, the call returns a \`Promise\` object instead of the resolved value.`);
+  }
+  if (asyncFnNames.length > 0 && !suspectLine) {
+    evidence.push(`The pasted code defines the async function${asyncFnNames.length > 1 ? "s" : ""} \`${asyncFnNames.join("`, `")}\`. Make sure every call site uses \`await\` (or \`.then()\`) to get the resolved value.`);
+  }
+  if (typeErr && suspectLine) {
+    evidence.push(`The error tries to read \`.${typeErr.prop}\` from \`${typeErr.nullish}\` — this is consistent with reading a property on a \`Promise\` object, which does not have a \`.${typeErr.prop}\` field.`);
+  }
+
+  const confidence: Confidence = (isThenNotFn || isPromiseProp) ? "High" : suspectLine ? "Medium" : "Low";
+  const fn = suspectLine ? findEnclosingFunction(lines, suspectLine.n) : undefined;
+
+  return {
+    plan: { kind: "generic", fnName: fn?.name },
+    result: {
+      problem: suspectFn
+        ? `\`${suspectFn}\` is called without \`await\`, so its result is a \`Promise\` object instead of the resolved value.`
+        : `An \`async\` function's result is used as a plain value without awaiting the \`Promise\`.`,
+      rootCause: suspectLine && suspectFn
+        ? `\`${suspectFn}\` is an \`async\` function. Calling it without \`await\` on line ${suspectLine.n} gives back a \`Promise\` object. Any property access or method call on that \`Promise\` (other than \`.then\`/\`.catch\`) will not find the data the function produces.`
+        : `An \`async\` function is used without \`await\` or \`.then()\`, so the resolved value is never extracted from the \`Promise\`.`,
+      evidence,
+      confidence,
+      suggestedFix: [
+        suspectLine && suspectFn
+          ? `Add \`await\` before the call on line ${suspectLine.n}: \`const result = await ${suspectFn}(...);\`. Make sure the calling function is also declared \`async\`.`
+          : `Add \`await\` before every call to the async function, or use \`.then(value => ...)\` to handle the resolved result. Make sure the surrounding function is declared \`async\` if using \`await\`.`,
+        `Why it works: \`await\` pauses execution until the \`Promise\` resolves and unwraps its value.`,
+        `Tip: if you cannot use \`async/await\` in the calling context, use \`.then(result => { /* use result here */ })\` instead.`,
+      ].join("\n\n"),
+      testSuggestion: `Cover: awaiting the result produces the expected value (normal case); not awaiting gives a \`Promise\` object (verify the type is correct after the fix); and error handling when the promise rejects.`,
     },
   };
 }
