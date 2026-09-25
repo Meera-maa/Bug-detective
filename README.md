@@ -102,7 +102,8 @@ The built-in analyzer handles these JavaScript/TypeScript patterns out of the bo
 | 2 | Reading a property of `undefined`/`null` — chained path | Medium |
 | 3 | API response shape mismatch (pasted JSON compared against code) | High |
 | 4 | Empty string/array indexed with `[0]` (e.g. `getInitials("")`) | High |
-| 5 | `ReferenceError: x is not defined` | High |
+| 5 | `ReferenceError: x is not defined` — name **never declared** anywhere in the code | **High** |
+| 5a | `ReferenceError: x is not defined` — name *mentioned* in code but likely out of scope or misspelled | Medium |
 | 6 | `SyntaxError` — unexpected token / missing bracket or brace | Medium |
 | 6a | `SyntaxError` from `response.json()` receiving HTML — server returned an error page instead of JSON | **High** |
 | 7 | `RangeError: Maximum call stack size exceeded` (infinite recursion) | High |
@@ -127,13 +128,15 @@ It never fabricates a root cause it cannot point to in the pasted input.
 ## Honest limitations
 
 - The analyzer is **rule-based**, not a language model. It is accurate on the patterns above.
-- Python and Java errors are reported honestly at `Low` confidence with the clues found in the input. The app says the built-in analyzer does not understand those languages.
-- **Run Test** executes JavaScript only. Other languages get a "run locally" state.
+- **Python** — partial support: `IndexError`, `KeyError`, `TypeError`, `NameError`, `AttributeError`, `ZeroDivisionError`, `ValueError`. Unrecognised Python errors fall through to the generic reasoner.
+- **Java** — partial support: `NullPointerException`, `ArrayIndexOutOfBoundsException`, `NumberFormatException`, `ArithmeticException`, `ClassCastException`. Unrecognised Java errors fall through to the generic reasoner.
+- Other languages report evidence-based findings at `Low` confidence via the fallback reasoner.
+- **Run Test** executes JavaScript only. Python, Java, and other languages get a "run locally" state.
 
 ## Roadmap
 
 - Sample project with planted bugs, so the workflow runs end to end on a real codebase
-- More bug types, including Python
+- More bug types (deeper Python/Java coverage, Ruby, Go)
 - A language-model-backed analyzer behind the same `AIProvider` interface
 
 ## Author

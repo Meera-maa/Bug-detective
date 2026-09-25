@@ -617,10 +617,19 @@ function analyzeGeneric(input: InvestigationInput, combined: string, isJsLike: b
 
   // ── Classify by error kind ─────────────────────────────────────────────────
   if (!isJsLike) {
-    // Non-JS language: honest about the limitation.
-    // Keep the exact phrase "only understands JavaScript and TypeScript" so existing tests pass.
-    evidence.push(`The built-in analyzer only understands JavaScript and TypeScript patterns, so it cannot analyse ${input.language} code.`);
-    rootCause = `The built-in analyzer only understands JavaScript and TypeScript patterns and cannot diagnose ${input.language} code. The evidence below is taken from the raw input.`;
+    // Python and Java have partial support — the specific patterns are handled before this
+    // fallback is reached. "Other" has no named patterns at all.
+    const hasPartialSupport = input.language === "Python" || input.language === "Java";
+    if (hasPartialSupport) {
+      // The specific Python/Java patterns did not match — be honest that this particular
+      // error is not yet recognised, rather than claiming no support at all.
+      evidence.push(`The built-in analyzer has partial ${input.language} support but does not recognise this specific error pattern. The clues below are taken from the raw input.`);
+      rootCause = `This ${input.language} error is not yet covered by the built-in analyzer's named patterns. The evidence below is based on the error message and stack trace. For a precise diagnosis, consult your ${input.language} documentation or a ${input.language}-aware tool.`;
+    } else {
+      // "Other" language — no named patterns at all.
+      evidence.push(`The built-in analyzer only understands JavaScript and TypeScript patterns, so it cannot analyse ${input.language} code.`);
+      rootCause = `The built-in analyzer only understands JavaScript and TypeScript patterns and cannot diagnose ${input.language} code. The evidence below is taken from the raw input.`;
+    }
     suggestedFix = `Use the error message and the stack trace line to locate the problem. Search for \`${truncate(headline, 60)}\` in your ${input.language} documentation for language-specific guidance.`;
     testSuggestion = `Once the cause is identified, write a test that reproduces the error scenario and confirm it passes after the fix.`;
     if (!stackLine && !frame) {

@@ -845,3 +845,237 @@ describe("verify: runSync isolates errors and shows useful failure output", () =
     }
   });
 });
+
+// ===========================================================================
+// Harness matcher tests — Fix 1: new matchers + sentinel trap
+// ===========================================================================
+
+describe("harness: new matchers work correctly", () => {
+  it("toContain passes when array includes the value", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect([1,2,3]).toContain(2); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(true);
+  });
+
+  it("toContain fails when array does not include the value", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect([1,2,3]).toContain(9); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(false);
+  });
+
+  it("toContain works on strings", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect('hello world').toContain('world'); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(true);
+  });
+
+  it("toBeGreaterThan passes when actual > expected", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect(5).toBeGreaterThan(3); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(true);
+  });
+
+  it("toBeGreaterThan fails when actual <= expected", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect(3).toBeGreaterThan(5); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(false);
+  });
+
+  it("toBeGreaterThanOrEqual passes when actual === expected", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect(3).toBeGreaterThanOrEqual(3); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(true);
+  });
+
+  it("toBeLessThan passes when actual < expected", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect(2).toBeLessThan(5); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(true);
+  });
+
+  it("toBeLessThanOrEqual passes when actual === expected", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect(4).toBeLessThanOrEqual(4); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(true);
+  });
+
+  it("toBeInstanceOf passes for matching constructor", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect(new Error('e')).toBeInstanceOf(Error); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(true);
+  });
+
+  it("toBeInstanceOf fails for non-matching constructor", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect('hello').toBeInstanceOf(Error); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(false);
+  });
+
+  it("toHaveLength passes for array with correct length", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect([1,2,3]).toHaveLength(3); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(true);
+  });
+
+  it("toHaveLength fails for array with wrong length", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect([1,2]).toHaveLength(5); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(false);
+  });
+
+  it("toHaveLength works on strings", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect('abc').toHaveLength(3); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(true);
+  });
+
+  it("toMatch passes when string matches regex", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect('hello').toMatch(/ell/); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(true);
+  });
+
+  it("toMatch fails when string does not match regex", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect('hello').toMatch(/xyz/); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(false);
+  });
+
+  it(".not.toContain passes when array does not include the value", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect([1,2,3]).not.toContain(9); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(true);
+  });
+
+  it(".not.toBeGreaterThan passes when actual is not greater", () => {
+    const r = runSync("", "describe('x', () => { it('t', () => { expect(2).not.toBeGreaterThan(5); }); });");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.results[0].passed).toBe(true);
+  });
+});
+
+describe("harness: sentinel trap for unsupported matchers", () => {
+  it("accessing an unknown matcher fails the test case instead of silently passing", () => {
+    // If the sentinel were absent, 'expect(x).toFakeNonExistentMatcher()' would return
+    // undefined (falsy? no — the call to undefined() would throw TypeError, but accessing
+    // the property itself returns undefined, which IS a truthy call target in some engines).
+    // With the Proxy sentinel it throws immediately with a clear error message.
+    const r = runSync(
+      "function f() { return 1; }",
+      "describe('x', () => { it('t', () => { expect(f()).toNonExistentMatcher(); }); });"
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.results[0].passed).toBe(false);
+      expect(r.results[0].message).toMatch(/Unsupported matcher|toNonExistentMatcher/i);
+    }
+  });
+
+  it("accessing an unknown .not matcher also fails with a clear message", () => {
+    const r = runSync(
+      "function f() { return 1; }",
+      "describe('x', () => { it('t', () => { expect(f()).not.toNonExistentMatcher(); }); });"
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.results[0].passed).toBe(false);
+      expect(r.results[0].message).toMatch(/Unsupported matcher|toNonExistentMatcher/i);
+    }
+  });
+});
+
+// ===========================================================================
+// Python/Java fallback message tests — Fix 2
+// ===========================================================================
+
+describe("python fallback: unrecognised Python error uses partial-support message", () => {
+  const { result } = analyze({
+    language: "Python",
+    error: "RecursionError: maximum recursion depth exceeded",
+    code: "def f(n):\n    return f(n - 1)",
+  });
+
+  it("produces a valid result", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+  });
+
+  it("does NOT say 'only understands JavaScript and TypeScript'", () => {
+    const allText = [result.rootCause, ...result.evidence].join(" ");
+    expect(allText).not.toMatch(/only understands JavaScript and TypeScript/i);
+  });
+
+  it("mentions partial Python support and that this error is not recognised", () => {
+    const allText = [result.rootCause, ...result.evidence].join(" ");
+    expect(allText).toMatch(/partial.*Python|Python.*partial/i);
+  });
+});
+
+describe("java fallback: unrecognised Java error uses partial-support message", () => {
+  const { result } = analyze({
+    language: "Java",
+    error: "java.lang.StackOverflowError",
+    code: "public void recurse() { recurse(); }",
+  });
+
+  it("produces a valid result", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+  });
+
+  it("does NOT say 'only understands JavaScript and TypeScript'", () => {
+    const allText = [result.rootCause, ...result.evidence].join(" ");
+    expect(allText).not.toMatch(/only understands JavaScript and TypeScript/i);
+  });
+
+  it("mentions partial Java support and that this error is not recognised", () => {
+    const allText = [result.rootCause, ...result.evidence].join(" ");
+    expect(allText).toMatch(/partial.*Java|Java.*partial/i);
+  });
+});
+
+describe("other language fallback: still says 'only understands JavaScript and TypeScript'", () => {
+  const { result } = analyze({
+    language: "Other",
+    error: "Some error in Ruby",
+    code: "x = 1",
+  });
+
+  it("produces a valid result with Low confidence", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.confidence).toBe("Low");
+  });
+
+  it("says the analyzer only understands JS and TS for Other languages", () => {
+    const allText = [result.rootCause, ...result.evidence].join(" ");
+    expect(allText).toMatch(/only understands JavaScript and TypeScript/i);
+  });
+});
+
+// ===========================================================================
+// not-a-function test generator — Fix 3: no TODO in generated test
+// ===========================================================================
+
+describe("test generator: not-a-function case produces a runnable test (no TODO)", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "TypeError: users.filter is not a function",
+    code: `function getActiveUsers(users) {
+  return users.filter(u => u.active);
+}`,
+  };
+  const { result, plan } = analyze(input);
+
+  it("analyzer identifies the not-a-function pattern", () => {
+    expect(plan.kind).toBe("not-a-function");
+  });
+
+  it("generated test does not contain // TODO", () => {
+    const test = buildTest(input, result, plan);
+    expect(test.code).not.toContain("// TODO");
+  });
+
+  it("generated test is valid and contains a describe block", () => {
+    const test = buildTest(input, result, plan);
+    expect(parseGeneratedTest(test).ok).toBe(true);
+    expect(test.code).toContain("describe(");
+  });
+});

@@ -7,7 +7,13 @@
  * `new Function` (Node, for our own tests).
  *
  * Supported matchers: toBe, toEqual, toBeNull, toBeUndefined, toBeTruthy, toBeFalsy, toThrow,
- * and `.not` for all of them. JavaScript only (no TypeScript syntax, no imports).
+ * toContain, toBeGreaterThan, toBeGreaterThanOrEqual, toBeLessThan, toBeLessThanOrEqual,
+ * toBeInstanceOf, toHaveLength, toMatch — and `.not` for all of them.
+ *
+ * Any unknown property access on the matcher object throws immediately so that unsupported
+ * matchers can never silently produce a false PASS.
+ *
+ * JavaScript only (no TypeScript syntax, no imports).
  */
 export const HARNESS_SOURCE = [
   "function __runTests(userCode, testCode) {",
@@ -24,13 +30,27 @@ export const HARNESS_SOURCE = [
   "  function expect(actual) {",
   "    var check = function (negate) {",
   "      function assert(ok, message) { if (negate ? ok : !ok) throw new Error(negate ? 'Expected NOT: ' + message : message); }",
-  "      return {",
+  "      var matchers = {",
   "        toBe: function (e) { assert(Object.is(actual, e), 'Expected ' + fmt(e) + ' but received ' + fmt(actual)); },",
   "        toEqual: function (e) { assert(same(actual, e), 'Expected ' + fmt(e) + ' but received ' + fmt(actual)); },",
   "        toBeNull: function () { assert(actual === null, 'Expected null but received ' + fmt(actual)); },",
   "        toBeUndefined: function () { assert(actual === undefined, 'Expected undefined but received ' + fmt(actual)); },",
   "        toBeTruthy: function () { assert(!!actual, 'Expected a truthy value but received ' + fmt(actual)); },",
   "        toBeFalsy: function () { assert(!actual, 'Expected a falsy value but received ' + fmt(actual)); },",
+  "        toContain: function (e) {",
+  "          var ok = Array.isArray(actual) ? actual.indexOf(e) !== -1 : typeof actual === 'string' && actual.indexOf(e) !== -1;",
+  "          assert(ok, 'Expected ' + fmt(actual) + ' to contain ' + fmt(e));",
+  "        },",
+  "        toBeGreaterThan: function (e) { assert(actual > e, 'Expected ' + fmt(actual) + ' to be greater than ' + fmt(e)); },",
+  "        toBeGreaterThanOrEqual: function (e) { assert(actual >= e, 'Expected ' + fmt(actual) + ' to be >= ' + fmt(e)); },",
+  "        toBeLessThan: function (e) { assert(actual < e, 'Expected ' + fmt(actual) + ' to be less than ' + fmt(e)); },",
+  "        toBeLessThanOrEqual: function (e) { assert(actual <= e, 'Expected ' + fmt(actual) + ' to be <= ' + fmt(e)); },",
+  "        toBeInstanceOf: function (C) { assert(actual instanceof C, 'Expected ' + fmt(actual) + ' to be an instance of ' + (C && C.name ? C.name : String(C))); },",
+  "        toHaveLength: function (e) { assert(actual != null && actual.length === e, 'Expected length ' + fmt(e) + ' but received ' + fmt(actual != null ? actual.length : actual)); },",
+  "        toMatch: function (pattern) {",
+  "          var re = pattern instanceof RegExp ? pattern : new RegExp(String(pattern));",
+  "          assert(re.test(String(actual)), 'Expected ' + fmt(actual) + ' to match ' + String(pattern));",
+  "        },",
   "        toThrow: function () {",
   "          var threw = false, err = null;",
   "          try { actual(); } catch (e) { threw = true; err = e; }",
@@ -38,6 +58,16 @@ export const HARNESS_SOURCE = [
   "          if (!negate && !threw) throw new Error('Expected function to throw, but it did not');",
   "        }",
   "      };",
+  // Sentinel: accessing any unknown property on the matcher throws immediately.
+  // This prevents unsupported matchers from silently returning undefined (truthy object)
+  // and producing a false PASS.
+  "      return new Proxy(matchers, {",
+  "        get: function (target, prop) {",
+  "          if (prop in target) return target[prop];",
+  "          if (prop === 'not' || prop === '__esModule' || typeof prop === 'symbol') return undefined;",
+  "          throw new Error('Unsupported matcher: expect(...)' + (negate ? '.not' : '') + '.' + String(prop) + '() — add it to the Bug Detective harness (lib/runner/harness.ts)');",
+  "        }",
+  "      });",
   "    };",
   "    var api = check(false);",
   "    api.not = check(true);",

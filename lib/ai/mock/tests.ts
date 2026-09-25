@@ -145,28 +145,28 @@ export function buildTest(input: InvestigationInput, result: InvestigationResult
     case "not-a-function": {
       const fnName = plan.fnName ?? "yourFunction";
       const { callee } = plan;
+      // For "not-a-function" we always have enough information to write a runnable test:
+      // the callee name is known, and the fix is to guard against non-function values.
+      // No TODO placeholders are needed here.
       const cases: Case[] = [
         {
           title: `does not throw when ${callee} is a valid function (normal case)`,
           body: [
-            `const validFn = () => "ok"; // TODO: replace with the real expected value`,
+            `const validFn = () => "ok";`,
             `expect(() => ${fnName}(validFn)).not.toThrow();`,
           ],
         },
         {
-          title: `throws (or guards) when ${callee} is undefined`,
+          title: `does not throw when ${callee} is undefined (after the fix)`,
           body: [`expect(() => ${fnName}(undefined)).not.toThrow();`],
         },
         {
-          title: `throws (or guards) when ${callee} is null`,
+          title: `does not throw when ${callee} is null (after the fix)`,
           body: [`expect(() => ${fnName}(null)).not.toThrow();`],
         },
         {
-          title: `throws (or guards) when ${callee} is a non-function value`,
-          body: [
-            `// A plain object is not callable`,
-            `expect(() => ${fnName}({})).not.toThrow();`,
-          ],
+          title: `does not throw when ${callee} is a plain object instead of a function`,
+          body: [`expect(() => ${fnName}({})).not.toThrow();`],
         },
       ];
       return {
@@ -179,29 +179,33 @@ export function buildTest(input: InvestigationInput, result: InvestigationResult
 
     case "stack-overflow": {
       const { fnName } = plan;
+      // Stack overflow tests always need the developer to fill in input values — the analyzer
+      // cannot know the domain values that trigger or avoid recursion from the snippet alone.
+      // The placeholders below are clearly labelled; the test is NOT runnable as-is.
       const cases: Case[] = [
         {
-          title: "does not throw for the base case",
+          title: "does not throw for the base case (fill in the smallest non-recursive input)",
           body: [
-            `// TODO: replace with the smallest input that should return directly (base case)`,
-            `const baseCase = undefined; // e.g. 0, "", [], null`,
+            `// Fill in: the smallest input that should return directly without recursing.`,
+            `// Examples: 0 for a factorial, "" for a string processor, [] for a list function.`,
+            `const baseCase = undefined; // TODO: replace with your base-case input`,
             `expect(() => ${fnName}(baseCase)).not.toThrow();`,
           ],
         },
         {
-          title: "returns the expected value for a small input",
+          title: "returns the expected value for a small input (fill in input and result)",
           body: [
-            `// TODO: replace with a small valid input and its expected result`,
-            `const smallInput = undefined;`,
-            `const expected = undefined;`,
+            `// Fill in: a small valid input and the exact result you expect back.`,
+            `const smallInput = undefined; // TODO: e.g. 1, "a", [1]`,
+            `const expected = undefined;   // TODO: the value ${fnName}(smallInput) should return`,
             `expect(${fnName}(smallInput)).toEqual(expected);`,
           ],
         },
         {
-          title: "does not throw for the input that triggered the crash (after the fix)",
+          title: "does not throw for the input that originally caused the crash (after the fix)",
           body: [
-            `// TODO: paste the input that originally caused the stack overflow`,
-            `const crashInput = undefined;`,
+            `// Fill in: paste the exact input that triggered the stack overflow.`,
+            `const crashInput = undefined; // TODO: the input that caused Maximum call stack exceeded`,
             `expect(() => ${fnName}(crashInput)).not.toThrow();`,
           ],
         },
@@ -216,21 +220,24 @@ export function buildTest(input: InvestigationInput, result: InvestigationResult
 
     case "generic": {
       const fnName = plan.fnName ?? "yourFunction";
+      // The generic plan does not have enough information to produce concrete test values.
+      // The test is a template — the developer must fill in the TODO values before running it.
       const code = [
         `import { describe, it, expect } from "vitest";`,
         `import { ${fnName} } from "./${fnName}";`,
         ``,
-        `// Template only: the built-in analyzer could not work out concrete inputs for this bug.`,
-        `// Replace the TODO values with the input that triggered the error, then run the test.`,
+        `// Template: the built-in analyzer identified the problem but cannot determine`,
+        `// the exact input values from the pasted code alone.`,
+        `// Fill in the TODO values with the real inputs, then run the test.`,
         `describe(${JSON.stringify(fnName)}, () => {`,
         `  it("does not throw for the input that caused the error", () => {`,
-        `    const failingInput = undefined; // TODO: the exact input that reproduced the error`,
+        `    const failingInput = undefined; // TODO: paste the exact input that reproduced the error`,
         `    expect(() => ${fnName}(failingInput)).not.toThrow();`,
         `  });`,
         ``,
         `  it("still works for a normal input", () => {`,
-        `    const normalInput = undefined; // TODO: a valid input`,
-        `    const expected = undefined; // TODO: the expected result`,
+        `    const normalInput = undefined; // TODO: a valid input that should succeed`,
+        `    const expected = undefined;    // TODO: the value ${fnName}(normalInput) should return`,
         `    expect(${fnName}(normalInput)).toEqual(expected);`,
         `  });`,
         `});`,
