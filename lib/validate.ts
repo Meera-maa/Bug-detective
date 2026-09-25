@@ -11,6 +11,8 @@ export const LIMITS = {
   error: 5_000,
   stackTrace: 10_000,
   code: 30_000,
+  expectedResult: 500,
+  actualResult: 500,
 } as const;
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; message: string };
@@ -26,6 +28,8 @@ export function parseInvestigationInput(raw: unknown): Parsed<InvestigationInput
   const error = typeof raw.error === "string" ? raw.error.trim() : "";
   const code = typeof raw.code === "string" ? raw.code.replace(/\s+$/, "") : "";
   const stackTrace = typeof raw.stackTrace === "string" ? raw.stackTrace.trim() : "";
+  const expectedResult = typeof raw.expectedResult === "string" ? raw.expectedResult.trim() : "";
+  const actualResult = typeof raw.actualResult === "string" ? raw.actualResult.trim() : "";
   const language = raw.language;
 
   if (!error) return { ok: false, message: "Describe the error first. Paste the error message you are seeing." };
@@ -33,13 +37,22 @@ export function parseInvestigationInput(raw: unknown): Parsed<InvestigationInput
   if (error.length > LIMITS.error) return { ok: false, message: `The error message is too long (max ${LIMITS.error} characters).` };
   if (stackTrace.length > LIMITS.stackTrace) return { ok: false, message: `The stack trace is too long (max ${LIMITS.stackTrace} characters).` };
   if (code.length > LIMITS.code) return { ok: false, message: `The code is too long (max ${LIMITS.code} characters). Paste only the relevant part.` };
+  if (expectedResult.length > LIMITS.expectedResult) return { ok: false, message: `The expected result is too long (max ${LIMITS.expectedResult} characters).` };
+  if (actualResult.length > LIMITS.actualResult) return { ok: false, message: `The actual result is too long (max ${LIMITS.actualResult} characters).` };
   if (typeof language !== "string" || !(LANGUAGES as readonly string[]).includes(language)) {
     return { ok: false, message: "Choose a supported language." };
   }
 
   return {
     ok: true,
-    value: { error, code, language: language as Language, ...(stackTrace ? { stackTrace } : {}) },
+    value: {
+      error,
+      code,
+      language: language as Language,
+      ...(stackTrace ? { stackTrace } : {}),
+      ...(expectedResult ? { expectedResult } : {}),
+      ...(actualResult ? { actualResult } : {}),
+    },
   };
 }
 

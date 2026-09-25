@@ -74,7 +74,7 @@ ${input.error}
 
 Stack trace:
 ${input.stackTrace ?? "(none)"}
-
+${input.expectedResult ? `\nExpected result: ${input.expectedResult}` : ""}${input.actualResult ? `\nActual result: ${input.actualResult}` : ""}
 Code:
 ${input.code}
 

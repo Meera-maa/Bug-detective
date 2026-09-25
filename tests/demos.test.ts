@@ -1079,3 +1079,176 @@ describe("test generator: not-a-function case produces a runnable test (no TODO)
     expect(test.code).toContain("describe(");
   });
 });
+
+// ===========================================================================
+// Logic bug with expected/actual — the core scenario from the issue
+// ===========================================================================
+
+describe("logic bug: wrong operator detected from expected/actual (price + quantity → *)", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "No error message. The function returns the wrong result.",
+    code: `function calculateTotal(price, quantity) {
+  return price + quantity;
+}
+
+const total = calculateTotal(10, 3);
+console.log(total);`,
+    expectedResult: "30",
+    actualResult: "13",
+  };
+  const { result } = analyze(input);
+
+  it("produces a valid investigation result", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+  });
+
+  it("reports High confidence when operator can be verified", () => {
+    expect(result.confidence).toBe("High");
+  });
+
+  it("identifies the wrong operator in the problem statement", () => {
+    expect(result.problem).toMatch(/\+|\*/);
+  });
+
+  it("mentions expected result 30 and actual result 13 in evidence", () => {
+    const text = result.evidence.join(" ");
+    expect(text).toMatch(/30/);
+    expect(text).toMatch(/13/);
+  });
+
+  it("quotes the return expression in evidence", () => {
+    const text = result.evidence.join(" ");
+    expect(text).toMatch(/price.*quantity|price \+ quantity/i);
+  });
+
+  it("explains the operator replacement in the suggested fix", () => {
+    expect(result.suggestedFix).toMatch(/\*/);
+    expect(result.suggestedFix).toMatch(/\+/);
+  });
+
+  it("produces a fixedCode with * instead of +", () => {
+    expect(result.fixedCode).toBeTruthy();
+    expect(result.fixedCode).toContain("price * quantity");
+    expect(result.fixedCode).not.toContain("price + quantity");
+  });
+
+  it("fixed code actually produces 30 when run", () => {
+    const test = `describe("calculateTotal", () => {
+  it("returns price * quantity", () => {
+    expect(calculateTotal(10, 3)).toBe(30);
+  });
+});`;
+    if (result.fixedCode) {
+      const report = runSync(result.fixedCode, test);
+      expect(report.ok).toBe(true);
+      if (report.ok) {
+        expect(report.results[0].passed).toBe(true);
+      }
+    }
+  });
+
+  it("original code fails the corrected test", () => {
+    const test = `describe("calculateTotal", () => {
+  it("returns price * quantity", () => {
+    expect(calculateTotal(10, 3)).toBe(30);
+  });
+});`;
+    const report = runSync(input.code, test);
+    expect(report.ok).toBe(true);
+    if (report.ok) {
+      expect(report.results[0].passed).toBe(false);
+    }
+  });
+});
+
+describe("logic bug: only expected provided — no fabrication, Medium confidence", () => {
+  const { result } = analyze({
+    language: "JavaScript" as const,
+    error: "No error message. The function returns the wrong result.",
+    code: `function double(n) {
+  return n + n;
+}`,
+    expectedResult: "some-string-result",
+    // no actualResult
+  });
+
+  it("produces a valid result", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+  });
+
+  it("does not claim High confidence without both numeric values", () => {
+    // 'some-string-result' is not a number so operator inference cannot fire
+    expect(result.confidence).not.toBe("High");
+  });
+
+  it("mentions the expected result in evidence", () => {
+    expect(result.evidence.join(" ")).toContain("some-string-result");
+  });
+
+  it("does not fabricate an actualResult that was not given", () => {
+    // The evidence should NOT invent an actual number
+    expect(result.evidence.join(" ")).not.toMatch(/actual result.*\d+/i);
+  });
+});
+
+describe("logic bug: expected/actual provided but no arithmetic return — still useful", () => {
+  const { result } = analyze({
+    language: "JavaScript" as const,
+    error: "No error. Wrong output.",
+    code: `function greet(name) {
+  return "Hello " + name;
+}`,
+    expectedResult: "Hi Alice",
+    actualResult: "Hello Alice",
+  });
+
+  it("produces a valid result", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+  });
+
+  it("mentions both the expected and actual in evidence or suggested fix", () => {
+    const text = [result.rootCause, result.suggestedFix, ...result.evidence].join(" ");
+    expect(text).toMatch(/Hi Alice|Hello Alice/);
+  });
+});
+
+describe("logic bug: no expected/actual and generic error — existing behaviour preserved", () => {
+  const { result } = analyze({
+    language: "JavaScript" as const,
+    error: "Error: assertion failed",
+    code: `function checkAge(age) {
+  if (age = 18) return true;
+  return false;
+}`,
+  });
+
+  it("produces a valid result", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+  });
+
+  it("still detects assignment-in-condition", () => {
+    expect(result.evidence.join(" ")).toMatch(/assignment|=.*if|single.*=/i);
+  });
+});
+
+describe("logic bug: no expected/actual and no generic error — Low confidence fallback", () => {
+  const { result } = analyze({
+    language: "JavaScript" as const,
+    error: "No error message. The function returns the wrong result.",
+    code: `function calculateTotal(price, quantity) {
+  return price + quantity;
+}`,
+    // no expectedResult, no actualResult
+  });
+
+  it("produces a valid result", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+  });
+
+  it("reports Low confidence (cannot identify any logic bug without more info)", () => {
+    // Without expected/actual and without a generic error signal,
+    // the logic analyzer does not fire, so we get the generic fallback.
+    expect(result.confidence).toBe("Low");
+  });
+});

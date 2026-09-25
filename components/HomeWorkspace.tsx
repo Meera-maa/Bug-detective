@@ -11,15 +11,17 @@ import { Notice } from "./Notice";
 import { RecentInvestigations } from "./RecentInvestigations";
 import { btnPrimary, btnSecondary, card, fieldBase } from "./ui";
 
-type FieldErrors = { error?: string; code?: string; stackTrace?: string };
+type FieldErrors = { error?: string; code?: string; stackTrace?: string; expectedResult?: string; actualResult?: string };
 
-function validate(error: string, stackTrace: string, code: string): FieldErrors {
+function validate(error: string, stackTrace: string, code: string, expectedResult: string, actualResult: string): FieldErrors {
   const errors: FieldErrors = {};
   if (!error.trim()) errors.error = "Paste the error message you are seeing.";
   else if (error.length > LIMITS.error) errors.error = `Too long (max ${LIMITS.error} characters).`;
   if (!code.trim()) errors.code = "Paste the code where the error happens.";
   else if (code.length > LIMITS.code) errors.code = `Too long (max ${LIMITS.code} characters). Paste only the relevant part.`;
   if (stackTrace.length > LIMITS.stackTrace) errors.stackTrace = `Too long (max ${LIMITS.stackTrace} characters).`;
+  if (expectedResult.length > LIMITS.expectedResult) errors.expectedResult = `Too long (max ${LIMITS.expectedResult} characters).`;
+  if (actualResult.length > LIMITS.actualResult) errors.actualResult = `Too long (max ${LIMITS.actualResult} characters).`;
   return errors;
 }
 
@@ -30,6 +32,9 @@ export function HomeWorkspace() {
   const [code, setCode] = useState("");
   const [language, setLanguage] = useState<Language>("JavaScript");
   const [showStack, setShowStack] = useState(false);
+  const [showExpectedActual, setShowExpectedActual] = useState(false);
+  const [expectedResult, setExpectedResult] = useState("");
+  const [actualResult, setActualResult] = useState("");
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [serverError, setServerError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -52,6 +57,9 @@ export function HomeWorkspace() {
     setShowStack(Boolean(demo.input.stackTrace));
     setCode(demo.input.code);
     setLanguage(demo.input.language);
+    setExpectedResult("");
+    setActualResult("");
+    setShowExpectedActual(false);
     setFieldErrors({});
     setServerError(null);
     setActiveDemo(id);
@@ -61,6 +69,9 @@ export function HomeWorkspace() {
     setError("");
     setStackTrace("");
     setCode("");
+    setExpectedResult("");
+    setActualResult("");
+    setShowExpectedActual(false);
     setFieldErrors({});
     setServerError(null);
     setActiveDemo(null);
@@ -70,12 +81,12 @@ export function HomeWorkspace() {
   async function onInvestigate() {
     if (loading) return;
     setServerError(null);
-    const errors = validate(error, stackTrace, code);
+    const errors = validate(error, stackTrace, code, expectedResult, actualResult);
     setFieldErrors(errors);
     if (errors.error) return errorRef.current?.focus();
     if (errors.code) return codeRef.current?.focus();
 
-    const parsed = parseInvestigationInput({ error, stackTrace, code, language });
+    const parsed = parseInvestigationInput({ error, stackTrace, code, language, expectedResult, actualResult });
     if (!parsed.ok) return setServerError(parsed.message);
 
     setLoading(true);
@@ -107,7 +118,7 @@ export function HomeWorkspace() {
     }
   }
 
-  const empty = !error.trim() && !code.trim() && !stackTrace.trim();
+  const empty = !error.trim() && !code.trim() && !stackTrace.trim() && !expectedResult.trim() && !actualResult.trim();
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
@@ -250,6 +261,77 @@ export function HomeWorkspace() {
             ) : (
               <button type="button" className="text-sm text-muted underline-offset-2 hover:text-ink hover:underline" onClick={() => setShowStack(true)}>
                 + Add a stack trace {stackTrace.trim() ? "(has content)" : "(optional)"}
+              </button>
+            )}
+          </div>
+
+          <div>
+            {showExpectedActual ? (
+              <>
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-sm font-medium">
+                    Expected &amp; actual result{" "}
+                    <span className="font-normal text-muted">(optional — for logic bugs)</span>
+                  </span>
+                  <button type="button" className="text-xs text-muted hover:text-ink" onClick={() => setShowExpectedActual(false)}>
+                    Hide
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label htmlFor="expected-result" className="mb-1 block text-xs font-medium text-muted">
+                      Expected result
+                    </label>
+                    <input
+                      id="expected-result"
+                      type="text"
+                      value={expectedResult}
+                      onChange={(e) => {
+                        setExpectedResult(e.target.value);
+                        if (fieldErrors.expectedResult) setFieldErrors((f) => ({ ...f, expectedResult: undefined }));
+                      }}
+                      placeholder="e.g. 30"
+                      spellCheck={false}
+                      aria-invalid={Boolean(fieldErrors.expectedResult)}
+                      className={`${fieldBase} font-mono text-sm ${fieldErrors.expectedResult ? "border-danger" : ""}`}
+                    />
+                    {fieldErrors.expectedResult && (
+                      <p className="mt-1 text-xs text-danger">{fieldErrors.expectedResult}</p>
+                    )}
+                  </div>
+                  <div>
+                    <label htmlFor="actual-result" className="mb-1 block text-xs font-medium text-muted">
+                      Actual result
+                    </label>
+                    <input
+                      id="actual-result"
+                      type="text"
+                      value={actualResult}
+                      onChange={(e) => {
+                        setActualResult(e.target.value);
+                        if (fieldErrors.actualResult) setFieldErrors((f) => ({ ...f, actualResult: undefined }));
+                      }}
+                      placeholder="e.g. 13"
+                      spellCheck={false}
+                      aria-invalid={Boolean(fieldErrors.actualResult)}
+                      className={`${fieldBase} font-mono text-sm ${fieldErrors.actualResult ? "border-danger" : ""}`}
+                    />
+                    {fieldErrors.actualResult && (
+                      <p className="mt-1 text-xs text-danger">{fieldErrors.actualResult}</p>
+                    )}
+                  </div>
+                </div>
+                <p className="mt-1.5 text-xs text-faint">
+                  Providing both values lets the analyzer identify the wrong operator automatically.
+                </p>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="text-sm text-muted underline-offset-2 hover:text-ink hover:underline"
+                onClick={() => setShowExpectedActual(true)}
+              >
+                + Add expected / actual result{(expectedResult.trim() || actualResult.trim()) ? " (has content)" : " (optional — for logic bugs)"}
               </button>
             )}
           </div>

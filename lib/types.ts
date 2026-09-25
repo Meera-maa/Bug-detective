@@ -15,6 +15,10 @@ export type InvestigationInput = {
   stackTrace?: string;
   code: string;
   language: Language;
+  /** Optional: the value the user expected the code to produce (for logic bugs). */
+  expectedResult?: string;
+  /** Optional: the value the code actually produced (for logic bugs). */
+  actualResult?: string;
 };
 
 export type Confidence = "Low" | "Medium" | "High";

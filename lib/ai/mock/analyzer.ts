@@ -1363,17 +1363,155 @@ function analyzeUnhandledRejection(input: InvestigationInput, combined: string):
 // Pattern 13: Logic / wrong-operator error
 // ---------------------------------------------------------------------------
 
+/** All binary arithmetic operators to try when inferring a wrong operator. */
+const ARITHMETIC_OPS = ["+", "-", "*", "/", "%"] as const;
+type ArithOp = (typeof ARITHMETIC_OPS)[number];
+
+/** Evaluate a simple two-operand arithmetic expression. Returns NaN if not possible. */
+function evalBinaryOp(a: number, op: ArithOp, b: number): number {
+  switch (op) {
+    case "+": return a + b;
+    case "-": return a - b;
+    case "*": return a * b;
+    case "/": return b !== 0 ? a / b : NaN;
+    case "%": return b !== 0 ? a % b : NaN;
+  }
+}
+
+/**
+ * Given a return expression that uses exactly one binary arithmetic operator,
+ * extract the operator character and its operand names.
+ * e.g. "price + quantity"  → { op: "+", left: "price", right: "quantity", line }
+ */
+function parseArithReturn(lines: ReturnType<typeof toLines>): {
+  op: ArithOp; left: string; right: string; lineN: number; lineText: string;
+} | null {
+  for (const l of lines) {
+    // Match: return <ident> <op> <ident>  (ignoring whitespace, no chained ops)
+    const m = /\breturn\s+([A-Za-z_$][\w$]*)\s*([+\-*/%])\s*([A-Za-z_$][\w$]*)\s*;?/.exec(l.text);
+    if (m && ARITHMETIC_OPS.includes(m[2] as ArithOp)) {
+      return { op: m[2] as ArithOp, left: m[1], right: m[3], lineN: l.n, lineText: l.text };
+    }
+  }
+  return null;
+}
+
+/**
+ * Given the function's parameter list, try to match param names to numeric values
+ * from the call site visible in the code (e.g. calculateTotal(10, 3)).
+ */
+function extractCallArgs(
+  lines: ReturnType<typeof toLines>,
+  fnName: string,
+  params: string[],
+): Map<string, number> | null {
+  const callRe = new RegExp(`\\b${escapeRegExp(fnName)}\\s*\\(([^)]+)\\)`);
+  for (const l of lines) {
+    const m = callRe.exec(l.text);
+    if (!m) continue;
+    const args = m[1].split(",").map((s) => s.trim());
+    const result = new Map<string, number>();
+    for (let i = 0; i < params.length && i < args.length; i++) {
+      const n = Number(args[i]);
+      if (!Number.isNaN(n)) result.set(params[i], n);
+    }
+    if (result.size > 0) return result;
+  }
+  return null;
+}
+
 function analyzeLogicError(input: InvestigationInput, combined: string): Analysis | null {
   const lines = toLines(input.code);
   const headline = firstLine(input.error);
 
-  // Only engage when the error is generic enough that a logic mistake is plausible.
-  // We look for structural clues in the code itself.
+  // The pattern can fire two ways:
+  //  A) The error message itself signals a generic/logic error (existing behaviour).
+  //  B) The user explicitly provided expected and/or actual result values.
+  const hasExpectedActual = Boolean(input.expectedResult?.trim() || input.actualResult?.trim());
   const isGenericError = /^Error:/i.test(headline) || /assertion/i.test(headline) || /expected.*received/i.test(combined);
-  if (!isGenericError && !/NaN/i.test(combined) && !/Infinity/i.test(combined)) return null;
+  const hasNaNSignal = /\bNaN\b/i.test(combined) || /\bInfinity\b/i.test(combined);
+
+  if (!hasExpectedActual && !isGenericError && !hasNaNSignal) return null;
 
   const evidence: string[] = [`The error message reads: \`${truncate(headline, 90)}\`.`];
   const suspects: string[] = [];
+  let fixedCode: string | undefined;
+
+  // ── Expected / Actual result provided by the user ────────────────────────
+  // This is the highest-quality signal: the user told us what went wrong.
+  const expectedStr = input.expectedResult?.trim() ?? "";
+  const actualStr = input.actualResult?.trim() ?? "";
+
+  if (expectedStr) evidence.push(`The user reported the expected result: \`${truncate(expectedStr, 80)}\`.`);
+  if (actualStr) evidence.push(`The user reported the actual result: \`${truncate(actualStr, 80)}\`.`);
+
+  // ── Operator inference: only when both values are numbers ─────────────────
+  // Try to find the arithmetic expression in the code and identify the wrong operator.
+  const expectedNum = expectedStr !== "" ? Number(expectedStr) : NaN;
+  const actualNum = actualStr !== "" ? Number(actualStr) : NaN;
+  const bothNumeric = !Number.isNaN(expectedNum) && !Number.isNaN(actualNum);
+
+  let operatorFix: { from: ArithOp; to: ArithOp; left: string; right: string; lineN: number } | null = null;
+
+  if (bothNumeric && hasExpectedActual) {
+    const arith = parseArithReturn(lines);
+    if (arith) {
+      evidence.push(`Line ${arith.lineN} (\`${truncate(arith.lineText)}\`) performs \`${arith.left} ${arith.op} ${arith.right}\`.`);
+
+      // Try to resolve the parameter values from a visible call site.
+      const fn = findEnclosingFunction(lines, arith.lineN);
+      const argMap = fn ? extractCallArgs(lines, fn.name, fn.params) : null;
+
+      if (argMap && argMap.has(arith.left) && argMap.has(arith.right)) {
+        const a = argMap.get(arith.left)!;
+        const b = argMap.get(arith.right)!;
+        const currentResult = evalBinaryOp(a, arith.op, b);
+
+        // Verify the current operator matches what the user reported as "actual".
+        const currentMatchesActual = !Number.isNaN(actualNum) && Math.abs(currentResult - actualNum) < 1e-9;
+
+        evidence.push(
+          currentMatchesActual
+            ? `With the inputs \`${arith.left} = ${a}\` and \`${arith.right} = ${b}\`, the current expression \`${a} ${arith.op} ${b}\` produces \`${currentResult}\`, which matches the reported actual result.`
+            : `With the inputs \`${arith.left} = ${a}\` and \`${arith.right} = ${b}\`, the current expression \`${a} ${arith.op} ${b}\` produces \`${currentResult}\`.`
+        );
+
+        // Search for an operator that produces the expected result.
+        for (const candidate of ARITHMETIC_OPS) {
+          if (candidate === arith.op) continue;
+          const candidateResult = evalBinaryOp(a, candidate, b);
+          if (!Number.isNaN(candidateResult) && Math.abs(candidateResult - expectedNum) < 1e-9) {
+            operatorFix = { from: arith.op, to: candidate, left: arith.left, right: arith.right, lineN: arith.lineN };
+            evidence.push(
+              `Replacing \`${arith.op}\` with \`${candidate}\` gives \`${a} ${candidate} ${b} = ${candidateResult}\`, which matches the expected result \`${expectedNum}\`.`
+            );
+            // Build fixedCode by replacing just that operator on the matching line.
+            const originalLine = lines[arith.lineN - 1].text;
+            // Replace the first occurrence of `left op right` → `left newOp right`
+            const fixedLine = originalLine.replace(
+              new RegExp(`(\\b${escapeRegExp(arith.left)}\\s*)${escapeRegExp(arith.op)}(\\s*${escapeRegExp(arith.right)}\\b)`),
+              `$1${candidate}$2`,
+            );
+            if (fixedLine !== originalLine) {
+              fixedCode = input.code.split("\n").map((l, i) => (i === arith.lineN - 1 ? fixedLine : l)).join("\n");
+            }
+            break;
+          }
+        }
+
+        if (!operatorFix) {
+          evidence.push(`No single arithmetic operator swap produces the expected result \`${expectedNum}\`. The logic error may involve more than the operator — check the expression on line ${arith.lineN}.`);
+        }
+      } else {
+        // Couldn't resolve param values from code, but we still know which line has the op.
+        if (bothNumeric) {
+          evidence.push(`The inputs to \`${arith.left} ${arith.op} ${arith.right}\` could not be confirmed from the visible code, but the expected and actual values suggest the operator may be wrong.`);
+        }
+      }
+
+      suspects.push("wrong-operator");
+    }
+  }
 
   // ── NaN propagation ──────────────────────────────────────────────────────
   const hasNaN = /\bNaN\b/.test(combined);
@@ -1414,37 +1552,91 @@ function analyzeLogicError(input: InvestigationInput, combined: string): Analysi
     suspects.push("loose-equality");
   }
 
-  // Only return if at least one concrete logic suspect was found.
-  if (suspects.length === 0) return null;
+  // ── No suspects — only fire if we have expected/actual evidence ───────────
+  // Without the user-provided values we would have nothing to say.
+  if (suspects.length === 0 && !hasExpectedActual) return null;
+  // With only expected/actual but no code pattern, still produce a useful result.
+  if (suspects.length === 0 && hasExpectedActual) suspects.push("wrong-result");
 
   const frame = parseStackFrame(input.stackTrace ?? combined);
   if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}:${frame.col}\`.`);
 
   const fnName = findEnclosingFunction(lines, lines.length)?.name;
 
+  // ── Determine confidence ──────────────────────────────────────────────────
+  // High: operator identified and verified against numeric expected/actual
+  // Medium: expected/actual provided, or a structural code pattern found
+  // Low:  generic error with no additional evidence (should not normally reach here)
+  const confidence: Confidence =
+    operatorFix ? "High"
+    : hasExpectedActual ? "Medium"
+    : suspects.length > 0 ? "Medium"
+    : "Low";
+
+  // ── Suggested fix ─────────────────────────────────────────────────────────
   const fixParts: string[] = [];
+  if (operatorFix) {
+    fixParts.push(
+      `Replace \`${operatorFix.from}\` with \`${operatorFix.to}\` on line ${operatorFix.lineN}: change \`${operatorFix.left} ${operatorFix.from} ${operatorFix.right}\` to \`${operatorFix.left} ${operatorFix.to} ${operatorFix.right}\`.`,
+      `Why it works: \`${operatorFix.left} ${operatorFix.to} ${operatorFix.right}\` produces the expected result \`${expectedNum}\`.`,
+    );
+  } else if (hasExpectedActual && !operatorFix) {
+    const arith = parseArithReturn(lines);
+    fixParts.push(
+      arith
+        ? `Check the expression on line ${arith.lineN} (\`${arith.left} ${arith.op} ${arith.right}\`). The expected result is \`${expectedStr}\` but the code produces \`${actualStr ?? "an incorrect value"}\`. Verify that \`${arith.op}\` is the right operator for this calculation.`
+        : `The code produces \`${actualStr || "an incorrect value"}\` but the expected result is \`${expectedStr}\`. Find the expression responsible and verify the operator and operands are correct.`,
+    );
+  }
   if (suspects.includes("NaN")) fixParts.push(`Validate numeric inputs before performing arithmetic. Use \`Number.isNaN()\` or \`Number.isFinite()\` to guard against \`NaN\` and \`Infinity\`. Use \`Number(x)\` with a fallback: \`const n = Number(x); if (Number.isNaN(n)) throw new Error("Expected a number");\``);
   if (suspects.includes("assignment-in-condition")) fixParts.push(`Change \`=\` to \`===\` in the \`if\` condition on line ${assignInCondition!.n} to compare instead of assign.`);
   if (suspects.includes("divide-by-zero")) fixParts.push(`Guard against a zero divisor before the division on line ${divByZeroLine!.n}: \`if (denominator === 0) throw new Error("Cannot divide by zero");\``);
   if (suspects.includes("off-by-one")) fixParts.push(`Use \`arr[arr.length - 1]\` to access the last element, not \`arr[arr.length]\`.`);
   if (suspects.includes("loose-equality")) fixParts.push(`Replace \`== null\` with explicit \`=== null || === undefined\` checks, or use the intentional \`== null\` idiom only when you deliberately want to catch both.`);
 
+  // ── Problem / rootCause ───────────────────────────────────────────────────
+  let problem: string;
+  let rootCause: string;
+
+  if (operatorFix) {
+    problem = `\`${operatorFix.left} ${operatorFix.from} ${operatorFix.right}\` uses \`${operatorFix.from}\` but \`${operatorFix.to}\` is needed to produce \`${expectedNum}\`.`;
+    rootCause = `The expression \`${operatorFix.left} ${operatorFix.from} ${operatorFix.right}\` on line ${operatorFix.lineN} uses the wrong arithmetic operator. Using \`${operatorFix.from}\` (addition) when the calculation requires \`${operatorFix.to}\` (${operatorFix.to === "*" ? "multiplication" : operatorFix.to === "-" ? "subtraction" : operatorFix.to === "/" ? "division" : "modulo"}) produces \`${actualNum}\` instead of the expected \`${expectedNum}\`.`;
+  } else if (hasExpectedActual) {
+    problem = `The function returns \`${actualStr || "an incorrect value"}\` but \`${expectedStr || "a different value"}\` was expected.`;
+    rootCause = `The code produces a different result than expected. ${
+      expectedStr && actualStr
+        ? `Expected: \`${expectedStr}\`, Actual: \`${actualStr}\`.`
+        : expectedStr
+          ? `The expected result is \`${expectedStr}\`.`
+          : `The actual result is \`${actualStr}\`.`
+    } The expression in the code does not perform the intended calculation.`;
+  } else {
+    problem = `A logic error was detected in the code: ${suspects.join(", ")}.`;
+    rootCause = `The code contains a logic mistake that produces incorrect results or throws: ${suspects.map((s) => {
+      if (s === "NaN") return "a \`NaN\` value propagates through arithmetic because a numeric conversion produced a non-number";
+      if (s === "assignment-in-condition") return `an assignment (\`=\`) is used inside an \`if\` condition instead of a comparison (\`===\`)`;
+      if (s === "divide-by-zero") return "a literal \`0\` is used as a divisor";
+      if (s === "off-by-one") return "an array is accessed at index \`.length\` (one past the end)";
+      if (s === "loose-equality") return "\`==\` is used with \`null\`/\`undefined\` where \`===\` was likely intended";
+      return s;
+    }).join("; ")}.`;
+  }
+
+  // ── testSuggestion ────────────────────────────────────────────────────────
+  const testSuggestion = operatorFix
+    ? `Cover: \`${operatorFix.left} = ${extractCallArgs(lines, fnName ?? "", [operatorFix.left])?.get(operatorFix.left) ?? "a"}\`, \`${operatorFix.right} = ${extractCallArgs(lines, fnName ?? "", [operatorFix.right])?.get(operatorFix.right) ?? "b"}\` → expect \`${expectedNum}\` (was failing); a zero input; and a negative value.`
+    : `Cover: a normal input that produces the correct result${expectedStr ? ` (expected: \`${expectedStr}\`)` : ""}; the input that triggered the error${actualStr ? ` (actual: \`${actualStr}\`)` : ""}; and boundary values (zero, empty, \`null\`, \`NaN\`).`;
+
   return {
     plan: { kind: "generic", fnName },
     result: {
-      problem: `A logic error was detected in the code: ${suspects.join(", ")}.`,
-      rootCause: `The code contains a logic mistake that produces incorrect results or throws: ${suspects.map((s) => {
-        if (s === "NaN") return "a \`NaN\` value propagates through arithmetic because a numeric conversion produced a non-number";
-        if (s === "assignment-in-condition") return `an assignment (\`=\`) is used inside an \`if\` condition instead of a comparison (\`===\`)`;
-        if (s === "divide-by-zero") return "a literal \`0\` is used as a divisor";
-        if (s === "off-by-one") return "an array is accessed at index \`.length\` (one past the end)";
-        if (s === "loose-equality") return "\`==\` is used with \`null\`/\`undefined\` where \`===\` was likely intended";
-        return s;
-      }).join("; ")}.`,
+      problem,
+      rootCause,
       evidence,
-      confidence: suspects.length > 0 ? "Medium" : "Low",
-      suggestedFix: fixParts.join("\n\n"),
-      testSuggestion: `Cover: a normal input that produces the correct result; the input that triggered the error; and boundary values (zero, empty, \`null\`, \`NaN\`).`,
+      confidence,
+      suggestedFix: fixParts.join("\n\n") || `Review the expression in the code. Expected: \`${expectedStr}\`, Actual: \`${actualStr}\`.`,
+      testSuggestion,
+      ...(fixedCode ? { fixedCode } : {}),
     },
   };
 }
