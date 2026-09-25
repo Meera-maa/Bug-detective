@@ -52,10 +52,18 @@ describe("robustness", () => {
     expect(parseInvestigationResult(result).ok).toBe(true);
   });
 
-  it("is honest about unsupported languages", () => {
-    const { result } = analyze({ language: "Python", error: "AttributeError: 'NoneType' object has no attribute 'name'", code: "print(user.name)" });
+  it("is honest about Other/unsupported languages", () => {
+    const { result } = analyze({ language: "Other", error: "Some unknown error", code: "x = 1" });
     expect(result.confidence).toBe("Low");
-    expect(result.evidence.join(" ")).toContain("only understands JavaScript and TypeScript");
+    expect(parseInvestigationResult(result).ok).toBe(true);
+  });
+
+  it("handles Python AttributeError (NoneType) with real analysis", () => {
+    const { result } = analyze({ language: "Python", error: "AttributeError: 'NoneType' object has no attribute 'name'", code: "print(user.name)" });
+    // Python is now partially supported — should not say "only understands JavaScript and TypeScript"
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.confidence).not.toBe("Low"); // should be Medium or High
+    expect(result.evidence.some((e) => /None|NoneType|attribute/i.test(e))).toBe(true);
   });
 
   it("handles a ReferenceError", () => {
@@ -504,5 +512,336 @@ describe("category: off-by-one (arr[arr.length])", () => {
 
   it("suggests arr[arr.length - 1]", () => {
     expect(result.suggestedFix).toContain("length - 1");
+  });
+});
+
+// ===========================================================================
+// Python analyzer tests (≥3 required)
+// ===========================================================================
+
+describe("python: IndexError — empty list access", () => {
+  const input = {
+    language: "Python" as const,
+    error: "IndexError: list index out of range",
+    stackTrace: `Traceback (most recent call last):
+  File "app.py", line 3, in get_first
+    return items[0]
+IndexError: list index out of range`,
+    code: `def get_first(items):
+    return items[0]`,
+  };
+  const { result } = analyze(input);
+
+  it("recognises IndexError pattern", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.problem).toMatch(/index|out of range/i);
+    expect(result.evidence.some((e) => /IndexError|index/i.test(e))).toBe(true);
+  });
+
+  it("reports High confidence when code line found", () => {
+    expect(result.confidence).toBe("High");
+  });
+
+  it("suggests a bounds check", () => {
+    expect(result.suggestedFix.toLowerCase()).toMatch(/len|bounds|index/i);
+  });
+});
+
+describe("python: KeyError — missing dict key", () => {
+  const input = {
+    language: "Python" as const,
+    error: "KeyError: 'email'",
+    stackTrace: `Traceback (most recent call last):
+  File "user.py", line 4, in get_email
+    return user["email"]
+KeyError: 'email'`,
+    code: `def get_email(user):
+    return user["email"]`,
+  };
+  const { result } = analyze(input);
+
+  it("identifies the missing key", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.problem).toMatch(/email|key/i);
+    expect(result.rootCause).toMatch(/email/i);
+  });
+
+  it("reports High confidence when key access line found", () => {
+    expect(result.confidence).toBe("High");
+  });
+
+  it("suggests .get() as the fix", () => {
+    expect(result.suggestedFix).toContain(".get(");
+  });
+});
+
+describe("python: ZeroDivisionError", () => {
+  const input = {
+    language: "Python" as const,
+    error: "ZeroDivisionError: division by zero",
+    stackTrace: `Traceback (most recent call last):
+  File "math.py", line 2, in divide
+    return a / b
+ZeroDivisionError: division by zero`,
+    code: `def divide(a, b):
+    return a / b`,
+  };
+  const { result } = analyze(input);
+
+  it("identifies division by zero", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.problem.toLowerCase()).toMatch(/zero|division/i);
+  });
+
+  it("reports High confidence when division line found", () => {
+    expect(result.confidence).toBe("High");
+  });
+
+  it("suggests a guard for zero divisor", () => {
+    expect(result.suggestedFix.toLowerCase()).toMatch(/!=\s*0|guard|divisor/i);
+  });
+});
+
+// ===========================================================================
+// Java analyzer tests (≥3 required)
+// ===========================================================================
+
+describe("java: NullPointerException — Java 14+ message", () => {
+  const input = {
+    language: "Java" as const,
+    error: `Exception in thread "main" java.lang.NullPointerException: Cannot invoke "String.length()" because "str" is null
+\tat com.example.StringUtils.process(StringUtils.java:8)`,
+    code: `public class StringUtils {
+    public int process(String str) {
+        return str.length();
+    }
+}`,
+  };
+  const { result } = analyze(input);
+
+  it("identifies the NPE with Java 14+ message", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.problem).toMatch(/null|NullPointer/i);
+    expect(result.evidence.some((e) => /str.*null|null.*str/i.test(e))).toBe(true);
+  });
+
+  it("reports High confidence when code line found", () => {
+    expect(result.confidence).toBe("High");
+  });
+
+  it("suggests a null check", () => {
+    expect(result.suggestedFix.toLowerCase()).toMatch(/null|Optional|requireNonNull/i);
+  });
+});
+
+describe("java: NumberFormatException — bad string", () => {
+  const input = {
+    language: "Java" as const,
+    error: `java.lang.NumberFormatException: For input string: "abc"
+\tat java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)
+\tat com.example.Parser.parse(Parser.java:5)`,
+    code: `public class Parser {
+    public int parse(String s) {
+        return Integer.parseInt(s);
+    }
+}`,
+  };
+  const { result } = analyze(input);
+
+  it("identifies the bad input string", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.problem).toMatch(/abc|number|parse/i);
+    expect(result.evidence.some((e) => /abc|NumberFormatException/i.test(e))).toBe(true);
+  });
+
+  it("reports High confidence", () => {
+    expect(result.confidence).toBe("High");
+  });
+
+  it("suggests try/catch around parseInt", () => {
+    expect(result.suggestedFix).toMatch(/try|catch|NumberFormatException/i);
+  });
+});
+
+describe("java: ArrayIndexOutOfBoundsException", () => {
+  const input = {
+    language: "Java" as const,
+    error: `java.lang.ArrayIndexOutOfBoundsException: Index 5 out of bounds for length 3
+\tat com.example.App.getItem(App.java:4)`,
+    code: `public class App {
+    public int getItem(int[] arr, int index) {
+        return arr[index];
+    }
+}`,
+  };
+  const { result } = analyze(input);
+
+  it("identifies the bad array index", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.problem).toMatch(/index|out of bounds/i);
+    expect(result.evidence.some((e) => /5|bounds|ArrayIndex/i.test(e))).toBe(true);
+  });
+
+  it("reports High confidence when code line found", () => {
+    expect(result.confidence).toBe("High");
+  });
+
+  it("suggests a bounds check", () => {
+    expect(result.suggestedFix.toLowerCase()).toMatch(/length|bounds|check/i);
+  });
+});
+
+// ===========================================================================
+// Additional JS/TS tests (≥3 required)
+// ===========================================================================
+
+describe("js: import/module error via ReferenceError — missing import", () => {
+  const input = {
+    language: "TypeScript" as const,
+    error: "ReferenceError: axios is not defined",
+    code: `async function fetchData(url: string) {
+  const response = await axios.get(url);
+  return response.data;
+}`,
+  };
+  const { result } = analyze(input);
+
+  it("identifies axios as undefined", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.problem).toContain("axios");
+  });
+
+  it("reports High confidence — no declaration found", () => {
+    expect(result.confidence).toBe("High");
+  });
+
+  it("suggests importing or declaring the variable", () => {
+    expect(result.suggestedFix.toLowerCase()).toMatch(/import|declare|install/i);
+  });
+});
+
+describe("js: TypeScript generic TypeError — fallback with stack-trace line", () => {
+  const input = {
+    language: "TypeScript" as const,
+    error: "TypeError: Cannot set properties of undefined (setting 'value')",
+    stackTrace: "    at updateField (form.ts:3:15)",
+    code: `function updateField(form: any) {
+  const input = form.fields[0];
+  input.value = "hello";
+}`,
+  };
+  const { result } = analyze(input);
+
+  it("produces a valid result for an unmatched TypeError", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.evidence.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("mentions the stack trace line in the diagnosis", () => {
+    // The fallback should quote the line from the stack trace
+    expect(
+      result.rootCause.toLowerCase().includes("line 3") ||
+      result.evidence.some((e) => /line 3|form\.ts/i.test(e))
+    ).toBe(true);
+  });
+
+  it("does not report Low confidence when stack trace is provided", () => {
+    expect(result.confidence).not.toBe("Low");
+  });
+});
+
+describe("js: environment / config error via ReferenceError — process not defined", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "ReferenceError: process is not defined",
+    code: `function getApiUrl() {
+  return process.env.API_URL;
+}`,
+  };
+  const { result } = analyze(input);
+
+  it("identifies process as undefined", () => {
+    expect(parseInvestigationResult(result).ok).toBe(true);
+    expect(result.problem).toContain("process");
+  });
+
+  it("reports High confidence (no import for process)", () => {
+    expect(result.confidence).toBe("High");
+  });
+});
+
+// ===========================================================================
+// Verify / test runner tests (≥2 required)
+// ===========================================================================
+
+describe("verify: runSync passes on fixed code and fails on original", () => {
+  // Simulate what the Verify button does: run the test on original (should fail) and fixed (should pass)
+  const originalCode = `function getInitials(fullName) {
+  return fullName
+    .split(" ")
+    .map((part) => part[0].toUpperCase())
+    .join("");
+}`;
+  const fixedCode = `function getInitials(fullName) {
+  if (typeof fullName !== "string" || fullName.trim() === "") {
+    return "";
+  }
+  return fullName
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part[0].toUpperCase())
+    .join("");
+}`;
+  const testCode = `describe("getInitials", () => {
+  it("returns initials for a normal name", () => {
+    expect(getInitials("Meera Nair")).toBe("MN");
+  });
+  it("does not throw for an empty string", () => {
+    expect(() => getInitials("")).not.toThrow();
+    expect(getInitials("")).toBe("");
+  });
+});`;
+
+  it("original code fails the test (reproduces the bug)", () => {
+    const report = runSync(originalCode, testCode);
+    expect(report.ok).toBe(true);
+    if (report.ok) {
+      expect(report.results.some((r) => !r.passed)).toBe(true);
+    }
+  });
+
+  it("fixed code passes all tests (fix is verified)", () => {
+    const report = runSync(fixedCode, testCode);
+    expect(report.ok).toBe(true);
+    if (report.ok) {
+      const failed = report.results.filter((r) => !r.passed);
+      expect(failed).toEqual([]);
+    }
+  });
+});
+
+describe("verify: runSync isolates errors and shows useful failure output", () => {
+  it("reports a meaningful error message when test code throws", () => {
+    const code = `function add(a, b) { return a + b; }`;
+    const test = `describe("add", () => {
+  it("throws intentionally", () => {
+    expect(add(1, 2)).toBe(99); // wrong expected value
+  });
+});`;
+    const report = runSync(code, test);
+    expect(report.ok).toBe(true);
+    if (report.ok) {
+      expect(report.results[0].passed).toBe(false);
+      expect(report.results[0].message).toMatch(/Expected|Received|99/i);
+    }
+  });
+
+  it("reports parse errors without crashing the runner", () => {
+    const report = runSync("function broken() {{{ syntax error", "describe('x', () => {});");
+    expect(report.ok).toBe(false);
+    if (!report.ok) {
+      expect(typeof report.error).toBe("string");
+      expect(report.error.length).toBeGreaterThan(0);
+    }
   });
 });

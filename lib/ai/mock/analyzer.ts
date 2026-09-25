@@ -23,6 +23,15 @@ import { escapeRegExp, findJsonObject, firstLine } from "./text";
  *  12. Unhandled promise rejection (missing .catch / try-catch)
  *  13. Logic / wrong-operator error (= vs ===, off-by-one, NaN comparison)
  *
+ * Python patterns (rule-based, partial):
+ *  P1. IndexError   P2. KeyError    P3. TypeError (wrong type)
+ *  P4. NameError    P5. AttributeError  P6. ZeroDivisionError  P7. ValueError
+ *
+ * Java patterns (rule-based, partial):
+ *  J1. NullPointerException       J2. ArrayIndexOutOfBoundsException
+ *  J3. NumberFormatException      J4. ArithmeticException (/ by zero)
+ *  J5. ClassCastException
+ *
  * Fallback (analyzeGeneric): runs for everything else. It reasons from the error type,
  * stack trace, and code structure to provide the most specific diagnosis possible from
  * the available evidence. It never fabricates a root cause it cannot point to.
@@ -137,6 +146,18 @@ function hasGuardBetween(lines: CodeLine[], from: number, to: number, name: stri
 export function analyze(input: InvestigationInput): Analysis {
   const isJsLike = input.language === "JavaScript" || input.language === "TypeScript";
   const combined = `${input.error}\n${input.stackTrace ?? ""}`;
+
+  if (input.language === "Python") {
+    const found = analyzePython(input, combined);
+    if (found) return found;
+    return analyzeGeneric(input, combined, false);
+  }
+
+  if (input.language === "Java") {
+    const found = analyzeJava(input, combined);
+    if (found) return found;
+    return analyzeGeneric(input, combined, false);
+  }
 
   if (isJsLike) {
     const typeError = parseTypeError(combined);
@@ -514,7 +535,15 @@ function analyzeReferenceError(input: InvestigationInput, combined: string, name
   const n = escapeRegExp(name);
   const uses = lines.filter((l) => new RegExp(`\\b${n}\\b`).test(l.text));
   if (uses.length === 0) return null;
-  const declared = lines.find((l) => new RegExp(`\\b(?:const|let|var|function|class|import)\\b[^;\\n]*\\b${n}\\b`).test(l.text) || new RegExp(`\\(([^)]*\\b${n}\\b[^)]*)\\)\\s*(?:=>|\\{)`).test(l.text));
+  // A line *declares* `name` if the keyword is immediately followed (with optional
+  // punctuation) by the name itself — e.g. `const axios = …`, `import axios from …`,
+  // `function axios(`, `import { axios }`.  A line like `const response = await axios.get()`
+  // does NOT declare `axios`, so we require the keyword to be adjacent to the name.
+  const declared = lines.find((l) =>
+    new RegExp(`\\b(?:const|let|var|function|class)\\s+${n}\\b`).test(l.text) ||
+    new RegExp(`\\bimport\\b[^;\\n]*(?:\\{[^}]*\\b${n}\\b[^}]*\\}|\\b${n}\\b)`).test(l.text) ||
+    new RegExp(`\\(([^)]*\\b${n}\\b[^)]*)\\)\\s*(?:=>|\\{)`).test(l.text)
+  );
   const frame = parseStackFrame(input.stackTrace ?? combined);
 
   const evidence = [
@@ -1409,4 +1438,505 @@ function analyzeLogicError(input: InvestigationInput, combined: string): Analysi
       testSuggestion: `Cover: a normal input that produces the correct result; the input that triggered the error; and boundary values (zero, empty, \`null\`, \`NaN\`).`,
     },
   };
+}
+
+// ===========================================================================
+// Python analyzer — rule-based, partial support
+// ===========================================================================
+
+/** Find the deepest (most recent) Python stack frame. */
+function lastPythonFrame(text: string): { file: string; line: number; fn?: string } | null {
+  const matches = [...text.matchAll(/File "([^"]+)",\s+line (\d+)(?:,\s+in\s+(\S+))?/g)];
+  if (matches.length === 0) return null;
+  const last = matches[matches.length - 1];
+  return { file: last[1], line: Number(last[2]), fn: last[3] };
+}
+
+type PyLine = { n: number; text: string };
+function toPyLines(code: string): PyLine[] {
+  return code.split("\n").map((text, i) => ({ n: i + 1, text }));
+}
+
+function pyTrunc(s: string, max = 70): string {
+  const t = s.trim();
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+export function analyzePython(input: InvestigationInput, combined: string): Analysis | null {
+  const headline = firstLine(input.error);
+  const lines = toPyLines(input.code);
+  const frame = lastPythonFrame(combined);
+
+  // ── P1: IndexError ────────────────────────────────────────────────────────
+  if (/\bIndexError\b/.test(combined)) {
+    const indexLine = frame ? lines.find((l) => l.n === frame.line) : undefined;
+    const listAccess = indexLine ?? lines.find((l) => /\[\s*[\w\-+*/]+\s*\]/.test(l.text));
+    const evidence: string[] = [`The error message reads: \`${pyTrunc(headline)}\`.`];
+    evidence.push(`\`IndexError\` in Python means you tried to access a list (or tuple/string) at an index that does not exist — the index is either negative beyond the start, or ≥ the length of the sequence.`);
+    if (listAccess) evidence.push(`Line ${listAccess.n} (\`${pyTrunc(listAccess.text)}\`) accesses a sequence by index.`);
+    if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`${frame.fn ? ` in \`${frame.fn}\`` : ""}.`);
+    const hasLenCheck = /\blen\s*\(/.test(input.code);
+    if (!hasLenCheck) evidence.push(`No \`len()\` check was found before the index access.`);
+    return {
+      plan: { kind: "generic", fnName: frame?.fn },
+      result: {
+        problem: `A sequence (list, tuple, or string) was accessed at an index that is out of range.`,
+        rootCause: listAccess
+          ? `Line ${listAccess.n} accesses a sequence by index but does not verify that the index is within bounds. When the sequence is shorter than expected — or empty — this throws \`IndexError\`.`
+          : `A sequence is accessed at an index that does not exist. Check that the sequence has at least as many elements as the highest index you use.`,
+        evidence,
+        confidence: listAccess ? "High" : "Medium",
+        suggestedFix: [
+          listAccess
+            ? `Before the access on line ${listAccess.n}, check that the index is within bounds: \`if index < len(sequence):\` or use a try/except block.`
+            : `Add a bounds check before every index access: \`if 0 <= idx < len(seq):\`.`,
+          `Why it works: accessing a sequence only when the index is valid prevents \`IndexError\`.`,
+          `Alternative: use \`.get(index, default)\` (for dicts) or catch \`IndexError\` and provide a fallback value.`,
+        ].join("\n\n"),
+        testSuggestion: `Cover: a list with enough elements (normal case), an empty list (the bug), and an index that equals the list length.`,
+      },
+    };
+  }
+
+  // ── P2: KeyError ──────────────────────────────────────────────────────────
+  const keyErr = /\bKeyError\b:\s*(.+)/.exec(combined);
+  if (keyErr) {
+    const missingKey = keyErr[1].trim().replace(/^['"]|['"]$/g, "");
+    const evidence: string[] = [`The error message reads: \`${pyTrunc(headline)}\`.`];
+    evidence.push(`\`KeyError: ${missingKey}\` means the dictionary does not contain the key \`${missingKey}\` at the moment it was accessed.`);
+    const keyRe = new RegExp(`\\[\\s*['"]${escapeRegExp(missingKey)}['"]\\s*\\]|\\[\\s*${escapeRegExp(missingKey)}\\s*\\]`);
+    const accessLine = lines.find((l) => keyRe.test(l.text));
+    if (accessLine) evidence.push(`Line ${accessLine.n} (\`${pyTrunc(accessLine.text)}\`) accesses the key \`${missingKey}\` directly.`);
+    if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`${frame.fn ? ` in \`${frame.fn}\`` : ""}.`);
+    const hasGetMethod = new RegExp(`\\.get\\s*\\(\\s*['"]${escapeRegExp(missingKey)}['"]`).test(input.code);
+    if (hasGetMethod) evidence.push(`A \`.get("${missingKey}")\` call exists elsewhere — make sure all accesses use the safe form.`);
+    return {
+      plan: { kind: "generic", fnName: frame?.fn },
+      result: {
+        problem: `The dictionary key \`${missingKey}\` does not exist at the time it is accessed.`,
+        rootCause: accessLine
+          ? `Line ${accessLine.n} uses \`dict["${missingKey}"]\`, which throws \`KeyError\` when the key is absent. Use \`dict.get("${missingKey}")\` to return a default instead, or check first with \`if "${missingKey}" in dict:\`.`
+          : `A dictionary is accessed with key \`${missingKey}\` which is not present. Either the key was never set, was deleted, or the data source returned a different key name.`,
+        evidence,
+        confidence: accessLine ? "High" : "Medium",
+        suggestedFix: [
+          `Replace \`dict["${missingKey}"]\` with \`dict.get("${missingKey}")\` (returns \`None\` when missing) or \`dict.get("${missingKey}", default_value)\`.`,
+          `Alternatively, guard with: \`if "${missingKey}" in my_dict: value = my_dict["${missingKey}"]\`.`,
+          `Why it works: \`.get()\` never raises \`KeyError\` — it returns \`None\` (or your default) when the key is absent.`,
+        ].join("\n\n"),
+        testSuggestion: `Cover: a dict that contains the key (normal case), a dict missing the key (the bug), and an empty dict.`,
+      },
+    };
+  }
+
+  // ── P3: TypeError ─────────────────────────────────────────────────────────
+  const pyTypeErr = /\bTypeError\b:\s*(.+)/.exec(combined);
+  if (pyTypeErr) {
+    const detail = pyTypeErr[1].trim();
+    const evidence: string[] = [`The error message reads: \`${pyTrunc(headline)}\`.`];
+    // "unsupported operand type(s) for +: 'int' and 'str'"
+    const operandM = /unsupported operand type\(s\) for (.+?):\s*'([^']+)' and '([^']+)'/.exec(detail);
+    // "'NoneType' object is not iterable"
+    const noneIterM = /'NoneType' object is not (iterable|subscriptable|callable)/.exec(detail);
+    // "can only concatenate str (not 'int') to str"
+    const concatM = /can only concatenate (\w+) \(not '(\w+)'\) to \1/.exec(detail);
+
+    let rootCause: string;
+    let confidence: Confidence = "Medium";
+    if (operandM) {
+      const op = operandM[1], t1 = operandM[2], t2 = operandM[3];
+      evidence.push(`Python cannot apply the \`${op}\` operator between \`${t1}\` and \`${t2}\` — the types are incompatible.`);
+      const opLine = lines.find((l) => new RegExp(`[${escapeRegExp(op)}]`).test(l.text));
+      if (opLine) evidence.push(`Line ${opLine.n} (\`${pyTrunc(opLine.text)}\`) performs a mixed-type operation.`);
+      if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+      rootCause = `The \`${op}\` operator was applied to a \`${t1}\` and a \`${t2}\`. Python does not automatically convert types — you must do so explicitly.`;
+      confidence = "High";
+    } else if (noneIterM) {
+      evidence.push(`\`NoneType\` means the value is \`None\`. Iterating over, subscripting, or calling \`None\` throws \`TypeError\`.`);
+      evidence.push(`A function or expression returned \`None\` when a sequence or callable was expected. Check whether the variable was assigned correctly.`);
+      if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+      rootCause = `The value is \`None\` (the function returned nothing, or an assignment failed), so it cannot be iterated/subscripted/called.`;
+      confidence = "High";
+    } else if (concatM) {
+      evidence.push(`Python does not allow concatenating \`${concatM[1]}\` with \`${concatM[2]}\` using \`+\`. Convert the \`${concatM[2]}\` to \`${concatM[1]}\` first.`);
+      rootCause = `Mixed types in a \`+\` concatenation: a \`${concatM[1]}\` and a \`${concatM[2]}\`. Use \`str(value)\` or an f-string.`;
+      confidence = "High";
+    } else {
+      evidence.push(`\`TypeError\` in Python means an operation was applied to a value of the wrong type.`);
+      if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+      rootCause = `A value of the wrong type was passed to or used in an operation. Check the types of every value involved at the failing line.`;
+    }
+    return {
+      plan: { kind: "generic", fnName: frame?.fn },
+      result: {
+        problem: `TypeError: ${pyTrunc(detail, 120)}`,
+        rootCause,
+        evidence,
+        confidence,
+        suggestedFix: operandM
+          ? `Convert one of the values to a compatible type before the operation. For example: \`int(value)\`, \`str(value)\`, or \`float(value)\` as appropriate.`
+          : noneIterM
+            ? `Trace back where the \`None\` value comes from. Ensure the function or expression that produced it always returns a real value. Add a guard: \`if value is not None:\` before using it.`
+            : `Check the types of every value at the failing line. Use \`type(value)\` or \`isinstance(value, expected_type)\` to verify types before operations.`,
+        testSuggestion: `Cover: the inputs that caused the TypeError, a normal valid input, and \`None\` as input.`,
+      },
+    };
+  }
+
+  // ── P4: NameError ─────────────────────────────────────────────────────────
+  const nameErr = /\bNameError\b:\s*name '([^']+)' is not defined/.exec(combined);
+  if (nameErr) {
+    const name = nameErr[1];
+    const evidence: string[] = [`The error message reads: \`${pyTrunc(headline)}\`.`];
+    evidence.push(`\`NameError\` means Python cannot find a variable, function, or module named \`${name}\` in the current scope.`);
+    const nameRe = new RegExp(`\\b${escapeRegExp(name)}\\b`);
+    const usageLine = lines.find((l) => nameRe.test(l.text));
+    if (usageLine) evidence.push(`\`${name}\` is used on line ${usageLine.n} (\`${pyTrunc(usageLine.text)}\`).`);
+    const importLine = lines.find((l) => /^import\b|^from\b/.test(l.text.trim()) && l.text.includes(name));
+    if (importLine) evidence.push(`An import mentioning \`${name}\` exists on line ${importLine.n}, but it may not have run or may have failed.`);
+    const assignBefore = lines.filter((l) => usageLine ? l.n < usageLine.n : true).find((l) => new RegExp(`\\b${escapeRegExp(name)}\\s*=`).test(l.text));
+    if (!assignBefore && !importLine) evidence.push(`No assignment or import for \`${name}\` appears before its use in the pasted code.`);
+    if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+    return {
+      plan: { kind: "generic", fnName: frame?.fn },
+      result: {
+        problem: `\`${name}\` is used but has not been defined.`,
+        rootCause: importLine
+          ? `\`${name}\` is mentioned in an import but may not be available in the current scope — the import may have failed, or \`${name}\` is not exported by the module.`
+          : assignBefore
+            ? `\`${name}\` is defined on line ${assignBefore.n} but may not have been executed before its use (e.g. defined inside a conditional block).`
+            : `\`${name}\` has not been assigned, imported, or passed in as a parameter. It may be a typo, a missing import, or a variable defined in another scope.`,
+        evidence,
+        confidence: usageLine ? "High" : "Medium",
+        suggestedFix: `Define \`${name}\` before using it, import it (\`import ${name}\` or \`from module import ${name}\`), or pass it as a parameter. If it is a typo, correct the name.`,
+        testSuggestion: `Cover: calling the code with \`${name}\` properly defined (normal case), and verifying it no longer raises \`NameError\`.`,
+      },
+    };
+  }
+
+  // ── P5: AttributeError ───────────────────────────────────────────────────
+  const attrErr = /\bAttributeError\b:\s*(.+)/.exec(combined);
+  if (attrErr) {
+    const detail = attrErr[1].trim();
+    const noneAttr = /'NoneType' object has no attribute '([^']+)'/.exec(detail);
+    const objAttr = /'([^']+)' object has no attribute '([^']+)'/.exec(detail);
+    const evidence: string[] = [`The error message reads: \`${pyTrunc(headline)}\`.`];
+    let rootCause: string;
+    let confidence: Confidence = "Medium";
+    if (noneAttr) {
+      const attr = noneAttr[1];
+      evidence.push(`The object is \`None\`. Reading attribute \`${attr}\` from \`None\` always raises \`AttributeError\`.`);
+      const attrLine = lines.find((l) => new RegExp(`\\.${escapeRegExp(attr)}\\b`).test(l.text));
+      if (attrLine) evidence.push(`Line ${attrLine.n} (\`${pyTrunc(attrLine.text)}\`) reads \`.${attr}\` without checking for \`None\`.`);
+      if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+      rootCause = `A variable that is \`None\` is used as if it has an attribute \`${attr}\`. The function or expression that produced the variable returned \`None\` instead of an object.`;
+      confidence = "High";
+      return {
+        plan: { kind: "generic", fnName: frame?.fn },
+        result: {
+          problem: `\`None\` has no attribute \`${attr}\` — the variable is \`None\` when an object is expected.`,
+          rootCause,
+          evidence,
+          confidence,
+          suggestedFix: [
+            `Add a \`None\` check before accessing \`.${attr}\`: \`if obj is not None: value = obj.${attr}\`.`,
+            `Or use the walrus operator: \`if (obj := get_something()) is not None: value = obj.${attr}\`.`,
+            `Why it works: the attribute is only read when the object actually exists.`,
+          ].join("\n\n"),
+          testSuggestion: `Cover: a real object with \`${attr}\` (normal case), \`None\` as the value (the bug), and a missing/empty value.`,
+        },
+      };
+    } else if (objAttr) {
+      const typeName = objAttr[1], attr = objAttr[2];
+      evidence.push(`\`${typeName}\` objects do not have a \`${attr}\` attribute in Python's standard library.`);
+      const attrLine = lines.find((l) => new RegExp(`\\.${escapeRegExp(attr)}\\b`).test(l.text));
+      if (attrLine) evidence.push(`Line ${attrLine.n} (\`${pyTrunc(attrLine.text)}\`) accesses \`.${attr}\`.`);
+      if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+      rootCause = `The object has type \`${typeName}\`, which does not have \`${attr}\`. Either the object is the wrong type, the attribute name is misspelled, or a different method achieves the same goal.`;
+      confidence = "Medium";
+    } else {
+      evidence.push(`\`AttributeError\` means the object does not have the attribute or method being accessed.`);
+      if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+      rootCause = `An attribute or method was accessed on an object that does not have it. This can happen if the object is the wrong type, is \`None\`, or the attribute name is misspelled.`;
+    }
+    return {
+      plan: { kind: "generic", fnName: frame?.fn },
+      result: {
+        problem: `AttributeError: ${pyTrunc(detail, 120)}`,
+        rootCause,
+        evidence,
+        confidence,
+        suggestedFix: `Check the type of the object with \`type(obj)\` or \`print(obj)\` before the failing line. Make sure it is the expected type and is not \`None\`. Use \`dir(obj)\` to see what attributes it actually has.`,
+        testSuggestion: `Cover: the correct object type (normal case), \`None\`, and a wrong-type value.`,
+      },
+    };
+  }
+
+  // ── P6: ZeroDivisionError ─────────────────────────────────────────────────
+  if (/\bZeroDivisionError\b/.test(combined)) {
+    const evidence: string[] = [`The error message reads: \`${pyTrunc(headline)}\`.`];
+    evidence.push(`\`ZeroDivisionError\` is raised when code divides by zero or takes the modulo of zero.`);
+    const divLine = lines.find((l) => /\/\s*0\b|\/\s*\w+/.test(l.text) && !/\/\//.test(l.text.slice(0, l.text.search(/\//))));
+    const actualDivLine = lines.find((l) => /\s*\/\s*|\s*%\s*/.test(l.text) && !/def |class |import /.test(l.text));
+    const target = divLine ?? actualDivLine;
+    if (target) evidence.push(`Line ${target.n} (\`${pyTrunc(target.text)}\`) performs a division or modulo operation.`);
+    if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+    return {
+      plan: { kind: "generic", fnName: frame?.fn },
+      result: {
+        problem: `Division by zero.`,
+        rootCause: target
+          ? `Line ${target.n} divides by a value that is zero at runtime. The divisor must be validated before the operation.`
+          : `A division or modulo operation has a zero divisor. Find the expression being divided by and validate it before use.`,
+        evidence,
+        confidence: target ? "High" : "Medium",
+        suggestedFix: [
+          target
+            ? `Add a guard before line ${target.n}: \`if divisor != 0: result = numerator / divisor\`.`
+            : `Add a guard before every division: \`if denominator != 0:\`.`,
+          `Or raise a descriptive error: \`if denominator == 0: raise ValueError("denominator must not be zero")\`.`,
+          `Why it works: the division is only attempted when the divisor is non-zero.`,
+        ].join("\n\n"),
+        testSuggestion: `Cover: a non-zero divisor (normal case), a zero divisor (the bug), and a negative divisor.`,
+      },
+    };
+  }
+
+  // ── P7: ValueError ────────────────────────────────────────────────────────
+  const valErr = /\bValueError\b:\s*(.+)/.exec(combined);
+  if (valErr) {
+    const detail = valErr[1].trim();
+    const evidence: string[] = [`The error message reads: \`${pyTrunc(headline)}\`.`];
+    evidence.push(`\`ValueError\` means a function received an argument of the right type but an invalid value (e.g. converting a non-numeric string to \`int\`, or using an invalid format string).`);
+    const intConvM = /invalid literal for int\(\) with base \d+: '([^']+)'/.exec(detail);
+    const notEnoughM = /not enough values to unpack/.test(detail);
+    let rootCause: string;
+    let confidence: Confidence = "Medium";
+    if (intConvM) {
+      const badVal = intConvM[1];
+      evidence.push(`\`int("${badVal}")\` fails because \`"${badVal}"\` cannot be parsed as an integer.`);
+      const intLine = lines.find((l) => /\bint\s*\(/.test(l.text));
+      if (intLine) evidence.push(`Line ${intLine.n} (\`${pyTrunc(intLine.text)}\`) converts a value to \`int\`.`);
+      if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+      rootCause = `\`int("${badVal}")\` cannot parse \`"${badVal}"\` as a number. The input contains non-numeric characters.`;
+      confidence = "High";
+    } else if (notEnoughM) {
+      evidence.push(`"Not enough values to unpack" means a tuple/list destructuring expected more values than were provided.`);
+      const unpackLine = lines.find((l) => /\s*=\s*\w+\s*$/.test(l.text) && /,/.test(l.text.split("=")[0]));
+      if (unpackLine) evidence.push(`Line ${unpackLine.n} (\`${pyTrunc(unpackLine.text)}\`) unpacks a sequence.`);
+      if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+      rootCause = `A destructuring assignment expected more elements than the sequence contains.`;
+    } else {
+      if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+      rootCause = `A function received a value of the correct type but an invalid content: ${pyTrunc(detail, 100)}.`;
+    }
+    return {
+      plan: { kind: "generic", fnName: frame?.fn },
+      result: {
+        problem: `ValueError: ${pyTrunc(detail, 120)}`,
+        rootCause,
+        evidence,
+        confidence,
+        suggestedFix: intConvM
+          ? `Validate the string before converting: \`if value.isdigit(): n = int(value)\`, or wrap in try/except: \`try: n = int(value)\nexcept ValueError: # handle bad input\`.`
+          : notEnoughM
+            ? `Check the number of elements in the sequence before unpacking, or use \`*rest\` to absorb extra/fewer items: \`a, *rest = sequence\`.`
+            : `Validate the value before passing it to the function. Add a try/except to catch \`ValueError\` and provide a meaningful error message.`,
+        testSuggestion: `Cover: a valid value (normal case), the invalid value that caused the error, and an edge case (empty string, zero, etc.).`,
+      },
+    };
+  }
+
+  return null;
+}
+
+// ===========================================================================
+// Java analyzer — rule-based, partial support
+// ===========================================================================
+
+function lastJavaFrame(text: string): { cls: string; method: string; file: string; line: number } | null {
+  const matches = [...text.matchAll(/at\s+([\w$.]+)\.([\w$<>]+)\(([\w$.]+\.java):(\d+)\)/g)];
+  if (matches.length === 0) return null;
+  const last = matches[0]; // first = most recent in Java
+  return { cls: last[1], method: last[2], file: last[3], line: Number(last[4]) };
+}
+
+type JavaLine = { n: number; text: string };
+function toJavaLines(code: string): JavaLine[] {
+  return code.split("\n").map((text, i) => ({ n: i + 1, text }));
+}
+
+function javaTrunc(s: string, max = 70): string {
+  const t = s.trim();
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+export function analyzeJava(input: InvestigationInput, combined: string): Analysis | null {
+  const headline = firstLine(input.error);
+  const lines = toJavaLines(input.code);
+  const frame = lastJavaFrame(combined);
+
+  // ── J1: NullPointerException ──────────────────────────────────────────────
+  if (/\bNullPointerException\b/.test(combined)) {
+    const evidence: string[] = [`The error message reads: \`${javaTrunc(headline)}\`.`];
+    // Java 14+ NPE messages include the null reference name.
+    const npeDetail = /Cannot (invoke|read field) "([^"]+)" because "([^"]+)" is null/.exec(combined);
+    if (npeDetail) {
+      evidence.push(`Java 14+ NPE message: cannot access \`${npeDetail[2]}\` because \`${npeDetail[3]}\` is null.`);
+    }
+    const dotLine = frame ? lines.find((l) => l.n === frame.line) : undefined;
+    if (dotLine) evidence.push(`Line ${dotLine.n} (\`${javaTrunc(dotLine.text)}\`) is the failing call.`);
+    if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\` in \`${frame.cls}.${frame.method}\`.`);
+    // Look for null checks around the failing line.
+    const nullCheckPresent = frame ? lines
+      .filter((l) => l.n < (frame.line) && l.n > Math.max(1, frame.line - 10))
+      .some((l) => /!=\s*null|==\s*null|\bObjects\.requireNonNull\b|\bOptional\b/.test(l.text)) : false;
+    if (!nullCheckPresent && dotLine) {
+      evidence.push(`No null check was found before line ${frame?.line ?? dotLine.n} in the pasted code.`);
+    }
+    return {
+      plan: { kind: "generic", fnName: frame?.method },
+      result: {
+        problem: npeDetail
+          ? `\`${npeDetail[3]}\` is null when \`${npeDetail[2]}\` is accessed.`
+          : `A \`NullPointerException\` was thrown — a null reference was dereferenced.`,
+        rootCause: npeDetail
+          ? `\`${npeDetail[3]}\` is null at the point where \`${npeDetail[2]}\` is accessed. The object was either never initialised, or a method returned null that was not checked.`
+          : dotLine
+            ? `Line ${dotLine.n} calls a method or accesses a field on a variable that is null. Java throws \`NullPointerException\` whenever you dereference a null reference.`
+            : `A null reference is being dereferenced. Find where the variable was assigned and check that it is always initialised to a non-null value.`,
+        evidence,
+        confidence: (npeDetail || dotLine) ? "High" : "Medium",
+        suggestedFix: [
+          dotLine
+            ? `Add a null check before line ${dotLine.n}: \`if (obj != null) { ... }\` or use \`Objects.requireNonNull(obj, "description")\` to fail fast with a clear message.`
+            : `Check every variable that could be null at the failing location. Use null checks, \`Optional<T>\`, or \`Objects.requireNonNull()\`.`,
+          `Java 8+: consider returning \`Optional<T>\` from methods that may not produce a value instead of returning \`null\`.`,
+          `Why it works: the operation is only performed when the reference is confirmed non-null.`,
+        ].join("\n\n"),
+        testSuggestion: `Cover: a properly initialised object (normal case), a null value (the bug), and the boundary where the object might be null.`,
+      },
+    };
+  }
+
+  // ── J2: ArrayIndexOutOfBoundsException ────────────────────────────────────
+  const aioob = /\bArrayIndexOutOfBoundsException\b.*?(\d+)/.exec(combined);
+  if (aioob || /\bArrayIndexOutOfBoundsException\b/.test(combined)) {
+    const badIndex = aioob?.[1];
+    const evidence: string[] = [`The error message reads: \`${javaTrunc(headline)}\`.`];
+    if (badIndex) evidence.push(`The index \`${badIndex}\` is out of range for the array.`);
+    evidence.push(`\`ArrayIndexOutOfBoundsException\` is thrown when you access an array at an index that is negative or ≥ the array's length.`);
+    const arrLine = frame ? lines.find((l) => l.n === frame.line) : lines.find((l) => /\[\s*[\w\-+*/]+\s*\]/.test(l.text));
+    if (arrLine) evidence.push(`Line ${arrLine.n} (\`${javaTrunc(arrLine.text)}\`) accesses an array by index.`);
+    if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\` in \`${frame.cls}.${frame.method}\`.`);
+    return {
+      plan: { kind: "generic", fnName: frame?.method },
+      result: {
+        problem: `An array was accessed at an index that is out of range${badIndex ? ` (index ${badIndex})` : ""}.`,
+        rootCause: arrLine
+          ? `Line ${arrLine.n} accesses an array element at an index that does not exist. Either the array is shorter than expected, or the index calculation is incorrect.`
+          : `An array is accessed at an invalid index. Check that the index is non-negative and less than the array's \`.length\`.`,
+        evidence,
+        confidence: arrLine ? "High" : "Medium",
+        suggestedFix: [
+          `Before the array access, add a bounds check: \`if (index >= 0 && index < arr.length)\`.`,
+          `If iterating, use a for-each loop: \`for (Type item : arr)\` — this never goes out of bounds.`,
+          `Why it works: the access is only performed when the index is within the valid range.`,
+        ].join("\n\n"),
+        testSuggestion: `Cover: a valid index (normal case), an index equal to \`length\` (one past the end — the bug), and an empty array.`,
+      },
+    };
+  }
+
+  // ── J3: NumberFormatException ─────────────────────────────────────────────
+  const numFmt = /\bNumberFormatException\b.*?(?:For input string:\s*"([^"]*)")?/.exec(combined);
+  if (numFmt) {
+    const badInput = numFmt[1];
+    const evidence: string[] = [`The error message reads: \`${javaTrunc(headline)}\`.`];
+    if (badInput !== undefined) evidence.push(`The string \`"${badInput}"\` cannot be parsed as a number.`);
+    evidence.push(`\`NumberFormatException\` is thrown by \`Integer.parseInt()\`, \`Double.parseDouble()\`, etc. when the string does not represent a valid number.`);
+    const parseLine = lines.find((l) => /\bparseInt\b|\bparseDouble\b|\bparseLong\b|\bparseFloat\b/.test(l.text));
+    if (parseLine) evidence.push(`Line ${parseLine.n} (\`${javaTrunc(parseLine.text)}\`) parses a string as a number.`);
+    if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+    return {
+      plan: { kind: "generic", fnName: frame?.method },
+      result: {
+        problem: `A string${badInput !== undefined ? ` (\`"${badInput}"\`)` : ""} could not be parsed as a number.`,
+        rootCause: parseLine
+          ? `Line ${parseLine.n} calls a parse method on a string that does not contain a valid numeric value. When the string contains non-numeric characters${badInput !== undefined ? ` (like \`"${badInput}"\`)` : ""}, Java throws \`NumberFormatException\`.`
+          : `A parse method (\`parseInt\`, \`parseDouble\`, etc.) received a string that is not a valid number. Validate the string before parsing.`,
+        evidence,
+        confidence: (parseLine || badInput !== undefined) ? "High" : "Medium",
+        suggestedFix: [
+          `Wrap the parse call in a try/catch: \`try { int n = Integer.parseInt(s); } catch (NumberFormatException e) { /* handle */ }\`.`,
+          `Or validate first: check that the string matches \`\\d+\` (or a suitable pattern) before parsing.`,
+          `Why it works: the exception is caught so the program can handle bad input gracefully.`,
+        ].join("\n\n"),
+        testSuggestion: `Cover: a valid numeric string (normal case), a non-numeric string (the bug), an empty string, and \`null\`.`,
+      },
+    };
+  }
+
+  // ── J4: ArithmeticException (/ by zero) ───────────────────────────────────
+  if (/\bArithmeticException\b.*?(?:\/\s*by\s*zero|divide by zero)/i.test(combined) || /\bArithmeticException\b/.test(combined)) {
+    const evidence: string[] = [`The error message reads: \`${javaTrunc(headline)}\`.`];
+    evidence.push(`\`ArithmeticException: / by zero\` is thrown when integer division or modulo is performed with a zero divisor in Java.`);
+    const divLine = frame ? lines.find((l) => l.n === frame.line) : lines.find((l) => /[/%]\s*\w+/.test(l.text) && !/\/\//.test(l.text));
+    if (divLine) evidence.push(`Line ${divLine.n} (\`${javaTrunc(divLine.text)}\`) performs a division or modulo operation.`);
+    if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+    return {
+      plan: { kind: "generic", fnName: frame?.method },
+      result: {
+        problem: `Integer division or modulo by zero.`,
+        rootCause: divLine
+          ? `Line ${divLine.n} divides by a value that is zero at runtime. Note: Java only throws \`ArithmeticException\` for integer division — floating-point division by zero produces \`Infinity\` without throwing.`
+          : `A division or modulo operation has a zero divisor. Add a guard before the operation.`,
+        evidence,
+        confidence: divLine ? "High" : "Medium",
+        suggestedFix: [
+          divLine
+            ? `Add a guard before line ${divLine.n}: \`if (divisor != 0) { result = numerator / divisor; } else { /* handle zero case */ }\`.`
+            : `Add a guard before every integer division: check the divisor is not zero before dividing.`,
+          `Why it works: the division is only attempted when the divisor is non-zero.`,
+        ].join("\n\n"),
+        testSuggestion: `Cover: a non-zero divisor (normal case), a zero divisor (the bug), and a negative divisor.`,
+      },
+    };
+  }
+
+  // ── J5: ClassCastException ────────────────────────────────────────────────
+  const classCast = /\bClassCastException\b.*?class\s+([\w$.]+)\s+cannot be cast to class\s+([\w$.]+)/i.exec(combined)
+    ?? /\bClassCastException\b.*?([\w$.]+)\s+cannot be cast to\s+([\w$.]+)/i.exec(combined);
+  if (classCast || /\bClassCastException\b/.test(combined)) {
+    const fromType = classCast?.[1] ?? "unknown";
+    const toType = classCast?.[2] ?? "unknown";
+    const evidence: string[] = [`The error message reads: \`${javaTrunc(headline)}\`.`];
+    if (classCast) evidence.push(`Java cannot cast \`${fromType}\` to \`${toType}\` — these types are incompatible.`);
+    evidence.push(`\`ClassCastException\` is thrown when you explicitly cast an object to a type it is not.`);
+    const castLine = frame ? lines.find((l) => l.n === frame.line) : lines.find((l) => /\([A-Z][\w.]*\)\s*\w+/.test(l.text));
+    if (castLine) evidence.push(`Line ${castLine.n} (\`${javaTrunc(castLine.text)}\`) performs a cast.`);
+    if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}\`.`);
+    return {
+      plan: { kind: "generic", fnName: frame?.method },
+      result: {
+        problem: classCast
+          ? `\`${fromType}\` cannot be cast to \`${toType}\`.`
+          : `An object was cast to a type it is not an instance of.`,
+        rootCause: classCast
+          ? `The object's actual runtime type is \`${fromType}\`, which is not a subtype of \`${toType}\`. Explicit casts only work when the object is actually an instance of the target type.`
+          : `A cast was attempted on an object whose runtime type is incompatible with the target type.`,
+        evidence,
+        confidence: (classCast || castLine) ? "High" : "Medium",
+        suggestedFix: [
+          castLine
+            ? `Before line ${castLine.n}, check the type with \`instanceof\`: \`if (obj instanceof TargetType t) { /* safe to use t */ }\` (Java 16+ pattern matching) or \`if (obj instanceof TargetType) { TargetType t = (TargetType) obj; }\`.`
+            : `Check the object's runtime type with \`instanceof\` before casting. Use generics to avoid casts altogether when possible.`,
+          `Why it works: the cast is only performed when the runtime type is confirmed to match.`,
+        ].join("\n\n"),
+        testSuggestion: `Cover: an object of the correct type (normal case), an object of the wrong type (the bug), and \`null\`.`,
+      },
+    };
+  }
+
+  return null;
 }

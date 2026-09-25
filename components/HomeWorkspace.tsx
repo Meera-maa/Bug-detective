@@ -207,9 +207,19 @@ export function HomeWorkspace() {
                 {fieldErrors.code}
               </p>
             )}
-            {language !== "JavaScript" && language !== "TypeScript" && (
+            {language === "Python" && (
               <p className="mt-1.5 text-xs text-faint">
-                The built-in offline analyzer understands JavaScript and TypeScript patterns. Other languages need IBM Bob to be connected.
+                The built-in analyzer has partial Python support (IndexError, KeyError, TypeError, NameError, AttributeError, ZeroDivisionError, ValueError). For unrecognised errors it provides general guidance.
+              </p>
+            )}
+            {language === "Java" && (
+              <p className="mt-1.5 text-xs text-faint">
+                The built-in analyzer has partial Java support (NullPointerException, ArrayIndexOutOfBoundsException, NumberFormatException, ArithmeticException, ClassCastException). For unrecognised errors it provides general guidance.
+              </p>
+            )}
+            {language === "Other" && (
+              <p className="mt-1.5 text-xs text-faint">
+                The built-in analyzer understands JavaScript, TypeScript, Python, and Java patterns. For other languages it provides general guidance based on the error message and stack trace.
               </p>
             )}
           </div>
