@@ -1,0 +1,48 @@
+{
+  "name": "bug-detective",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-assisted debugging workflow: from error message and code to root cause, evidence, fix and a verified regression test.",
+  "author": "Meera-maa",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Meera-maa/bug-detective.git"
+  },
+  "keywords": [
+    "debugging",
+    "developer-tools",
+    "nextjs",
+    "typescript",
+    "ai",
+    "ibm-bob",
+    "hackathon"
+  ],
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "16.3.5",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^22.20.3",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.5",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "vitest": "^5.0.1"
+  }
+}
