@@ -5,8 +5,15 @@ import { MockProvider } from "./mock";
 /**
  * The only place that decides which AI backend is used.
  *
- *   AI_PROVIDER=mock   (default) built-in offline analyzer, no credentials needed
- *   AI_PROVIDER=bob    IBM Bob (see lib/ai/bob.ts - needs to be connected first)
+ * ARCHITECTURE NOTE — IBM Bob vs. the mock provider
+ * --------------------------------------------------
+ * IBM Bob 2.0 is the AI *development agent* used to build this application.
+ * It is not a callable runtime API. The working analysis flow for the demo is
+ * the MockProvider (lib/ai/mock/), which was designed and tested with Bob's help.
+ *
+ * AI_PROVIDER=mock   (default) Built-in offline analyzer — this is the demo provider.
+ * AI_PROVIDER=bob    Reserved slot for a future callable IBM AI API (see lib/ai/bob.ts).
+ *                    Not functional; selecting it throws ProviderUnavailableError.
  */
 export function getProvider(): AIProvider {
   const choice = (process.env.AI_PROVIDER ?? "mock").toLowerCase();

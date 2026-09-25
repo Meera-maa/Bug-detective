@@ -1,23 +1,28 @@
+/**
+ * IBM Bob — Role in this project
+ * ================================
+ * IBM Bob 2.0 is the AI development assistant (the coding agent) that was used to BUILD this
+ * application. It is not a callable runtime API. There is no IBM Bob HTTP endpoint, SDK, or
+ * API key that an application can use to send prompts at runtime.
+ *
+ * What this means for Bug Detective:
+ *   - The working AI analysis flow is the MockProvider (lib/ai/mock/).
+ *     It was designed, written, and tested with IBM Bob as the development agent.
+ *   - This file exists to document the distinction and to preserve the integration slot
+ *     in case a future IBM product ships a callable API with compatible semantics.
+ *
+ * If a callable IBM AI API becomes available, implement `askBob()` below, add the
+ * required credentials to .env.local (server-side only, never NEXT_PUBLIC_*), and
+ * set AI_PROVIDER=bob. The rest of the pipeline (validation, UI, test runner) is
+ * already wired up and will work without further changes.
+ *
+ * See BOB_CONTRIBUTIONS.md for what IBM Bob (as a dev agent) actually built in this project.
+ */
+
 import type { GeneratedTest, InvestigationInput, InvestigationResult } from "@/lib/types";
 import { extractJson } from "@/lib/validate";
 import { MalformedResponseError, ProviderUnavailableError, type AIProvider } from "./provider";
 
-/**
- * IBM Bob provider - INTEGRATION POINT.
- *
- * Status: not connected. No IBM Bob API, SDK, endpoint or auth scheme is assumed here,
- * because none was available in this project when it was built.
- *
- * Everything around the missing piece is ready:
- *   - prompts that ask for the exact JSON shape the UI needs
- *   - JSON extraction for replies wrapped in code fences or extra prose
- *   - validation happens afterwards in the API routes (lib/validate.ts)
- *
- * To connect IBM Bob, implement `askBob()` below using whatever access method
- * IBM Bob gives you (its documentation, CLI, or an API key from the hackathon).
- * Keep credentials in environment variables (server-side only), never in client code.
- * Then run with AI_PROVIDER=bob.
- */
 export class IbmBobProvider implements AIProvider {
   readonly name = "IBM Bob";
 
@@ -41,13 +46,15 @@ function parseReply(reply: string): unknown {
 }
 
 /**
- * TODO(connect IBM Bob): send `prompt` to IBM Bob and return its reply as plain text.
- * Throw ProviderUnavailableError if Bob cannot be reached or is not configured.
+ * TO CONNECT A CALLABLE IBM AI API: replace this stub with a real HTTP call.
+ * Throw ProviderUnavailableError if the service cannot be reached or is not configured.
+ * Keep credentials in server-side environment variables only (never NEXT_PUBLIC_*).
  */
-async function askBob(prompt: string): Promise<string> {
-  void prompt;
+async function askBob(_prompt: string): Promise<string> {
   throw new ProviderUnavailableError(
-    "IBM Bob is not connected yet. Implement askBob() in lib/ai/bob.ts, or run with AI_PROVIDER=mock.",
+    "IBM Bob is the development agent for this project, not a runtime API. " +
+    "The application runs on the built-in analyzer (AI_PROVIDER=mock). " +
+    "See lib/ai/bob.ts for details on how to connect a callable AI API if one becomes available.",
   );
 }
 
