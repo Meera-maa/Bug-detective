@@ -267,73 +267,59 @@ export function HomeWorkspace() {
 
           <div>
             {showExpectedActual ? (
-              <>
-                <div className="mb-1.5 flex items-center justify-between">
-                  <span className="text-sm font-medium">
-                    Expected &amp; actual result{" "}
-                    <span className="font-normal text-muted">(optional — for logic bugs)</span>
-                  </span>
-                  <button type="button" className="text-xs text-muted hover:text-ink" onClick={() => setShowExpectedActual(false)}>
-                    Hide
-                  </button>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label htmlFor="expected-result" className="mb-1 block text-xs font-medium text-muted">
-                      Expected result
-                    </label>
-                    <input
-                      id="expected-result"
-                      type="text"
-                      value={expectedResult}
-                      onChange={(e) => {
-                        setExpectedResult(e.target.value);
-                        if (fieldErrors.expectedResult) setFieldErrors((f) => ({ ...f, expectedResult: undefined }));
-                      }}
-                      placeholder="e.g. 30"
-                      spellCheck={false}
-                      aria-invalid={Boolean(fieldErrors.expectedResult)}
-                      className={`${fieldBase} font-mono text-sm ${fieldErrors.expectedResult ? "border-danger" : ""}`}
-                    />
-                    {fieldErrors.expectedResult && (
-                      <p className="mt-1 text-xs text-danger">{fieldErrors.expectedResult}</p>
-                    )}
-                  </div>
-                  <div>
-                    <label htmlFor="actual-result" className="mb-1 block text-xs font-medium text-muted">
-                      Actual result
-                    </label>
-                    <input
-                      id="actual-result"
-                      type="text"
-                      value={actualResult}
-                      onChange={(e) => {
-                        setActualResult(e.target.value);
-                        if (fieldErrors.actualResult) setFieldErrors((f) => ({ ...f, actualResult: undefined }));
-                      }}
-                      placeholder="e.g. 13"
-                      spellCheck={false}
-                      aria-invalid={Boolean(fieldErrors.actualResult)}
-                      className={`${fieldBase} font-mono text-sm ${fieldErrors.actualResult ? "border-danger" : ""}`}
-                    />
-                    {fieldErrors.actualResult && (
-                      <p className="mt-1 text-xs text-danger">{fieldErrors.actualResult}</p>
-                    )}
-                  </div>
-                </div>
-                <p className="mt-1.5 text-xs text-faint">
-                  Providing both values lets the analyzer identify the wrong operator automatically.
-                </p>
-              </>
-            ) : (
-              <button
-                type="button"
-                className="text-sm text-muted underline-offset-2 hover:text-ink hover:underline"
-                onClick={() => setShowExpectedActual(true)}
-              >
-                + Add expected / actual result{(expectedResult.trim() || actualResult.trim()) ? " (has content)" : " (optional — for logic bugs)"}
-              </button>
-            )}
+  <>
+    <div className="mb-1.5 flex items-center justify-between">
+      <label htmlFor="expectedResult" className="text-sm font-medium">
+        Expected result <span className="font-normal text-muted">(optional)</span>
+      </label>
+      <button
+        type="button"
+        className="text-xs text-muted hover:text-ink"
+        onClick={() => setShowExpectedActual(false)}
+      >
+        Hide
+      </button>
+    </div>
+
+    <input
+      id="expectedResult"
+      value={expectedResult}
+      onChange={(e) => setExpectedResult(e.target.value)}
+      placeholder="Example: 13"
+      className={fieldBase}
+    />
+
+    <div className="mt-3 mb-1.5">
+      <label htmlFor="actualResult" className="text-sm font-medium">
+        Actual result <span className="font-normal text-muted">(optional)</span>
+      </label>
+    </div>
+
+    <input
+      id="actualResult"
+      value={actualResult}
+      onChange={(e) => setActualResult(e.target.value)}
+      placeholder="Example: 30"
+      className={fieldBase}
+    />
+
+    {fieldErrors.expectedResult && (
+      <p className="mt-1.5 text-sm text-danger">{fieldErrors.expectedResult}</p>
+    )}
+
+    {fieldErrors.actualResult && (
+      <p className="mt-1.5 text-sm text-danger">{fieldErrors.actualResult}</p>
+    )}
+  </>
+) : (
+  <button
+    type="button"
+    className="text-sm text-muted underline-offset-2 hover:text-ink hover:underline"
+    onClick={() => setShowExpectedActual(true)}
+  >
+    + Add expected & actual result (optional)
+  </button>
+)}
           </div>
 
           {serverError && (
