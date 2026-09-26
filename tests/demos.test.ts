@@ -390,6 +390,37 @@ function getUserProfile(id) {
   });
 });
 
+describe("pattern: null-guard test checks the missing and normal profile contracts", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "TypeError: Cannot read properties of undefined (reading 'id')",
+    stackTrace: "    at getUserProfile (profile.js:2:17)",
+    code: `function getUserProfile(user) {
+  const userId = user.id;
+  return { id: user.id, name: user.name, email: user.email, role: user.role };
+}`,
+  };
+  const { result, plan } = analyze(input);
+  const generated = buildTest(input, result, plan);
+
+  it("expects null for a missing user and the full object for a normal user", () => {
+    expect(plan.kind).toBe("null-guard");
+    expect(generated.code).toContain("expect(() => getUserProfile(undefined)).not.toThrow()");
+    expect(generated.code).toContain("expect(getUserProfile(undefined)).toBeNull()");
+    expect(generated.code).toContain('expect(getUserProfile({ id: "sample", name: "Meera", email: "meera@example.com", role: "sample" })).toEqual({ id: "sample", name: "Meera", email: "meera@example.com", role: "sample" })');
+    expect(generated.code).not.toContain("expected = undefined");
+  });
+
+  it("fails on the original code and passes on the suggested fix", () => {
+    const before = runSync(input.code, generated.code);
+    const after = runSync(result.fixedCode ?? "", generated.code);
+    expect(before.ok).toBe(true);
+    expect(before.ok && before.results.some((test) => !test.passed)).toBe(true);
+    expect(after.ok).toBe(true);
+    if (after.ok) expect(after.results.filter((test) => !test.passed)).toEqual([]);
+  });
+});
+
 describe("pattern: X is not iterable", () => {
   const input = {
     language: "JavaScript" as const,

@@ -276,8 +276,8 @@ function View({ record }: { record: InvestigationRecord }) {
                   It passes on your original code, so it would not catch this bug coming back. Adjust the test inputs before relying on it.
                 </Notice>
               ) : (
-                <Notice tone="warning" title="The fix is not verified">
-                  Some tests still fail with the suggested fix. Review the failing tests before applying the fix.
+                <Notice tone="warning" title={after?.detail ?? "The fix is not verified"}>
+                  Review the failing test above.
                 </Notice>
               )}
             </section>

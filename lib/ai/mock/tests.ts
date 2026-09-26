@@ -1,6 +1,6 @@
 import type { GeneratedTest, InvestigationInput, InvestigationResult } from "@/lib/types";
 import type { TestPlan } from "./analyzer";
-import { jsLiteral } from "./text";
+import { escapeRegExp, jsLiteral } from "./text";
 
 const sample = (prop: string) => (/name/i.test(prop) ? "Meera" : /email/i.test(prop) ? "meera@example.com" : "sample");
 
@@ -26,6 +26,35 @@ function render(fnName: string, problem: string, ext: string, cases: Case[]): st
   return `${header(fnName, problem, ext)}\n\ndescribe(${JSON.stringify(fnName)}, () => {\n${blocks.join("\n\n")}\n});\n`;
 }
 
+function inferObjectReturn(code: string, rootParam: string, path: string[], prop: string): { input: unknown; expected: Record<string, unknown> } | null {
+  const returnedObject = /\breturn\s*\{([\s\S]*?)\}/.exec(code)?.[1];
+  if (!returnedObject) return null;
+  const source = [rootParam, ...path].join(".");
+  const inputValue: Record<string, unknown> = { [prop]: sample(prop) };
+  const expected: Record<string, unknown> = {};
+  const entries = returnedObject.split(",").map((entry) => /^\s*([A-Za-z_$][\w$]*)\s*:\s*(.*?)\s*$/.exec(entry)).filter((entry) => entry !== null);
+  if (entries.length === 0) return null;
+
+  for (const entry of entries) {
+    const [, key, expression] = entry;
+    const field = new RegExp(`^${escapeRegExp(source)}\\.([A-Za-z_$][\\w$]*)$`).exec(expression)?.[1];
+    if (field) {
+      const value = sample(field);
+      inputValue[field] = value;
+      expected[key] = value;
+      continue;
+    }
+    try {
+      expected[key] = JSON.parse(expression);
+    } catch {
+      return null;
+    }
+  }
+
+  const input = path.reduceRight<unknown>((inner, segment) => ({ [segment]: inner }), inputValue);
+  return { input, expected };
+}
+
 export function buildTest(input: InvestigationInput, result: InvestigationResult, plan: TestPlan): GeneratedTest {
   if (input.language === "Python") return buildPythonTest(input, plan);
   if (input.language === "Java") return buildJavaTest(plan);
@@ -37,18 +66,20 @@ export function buildTest(input: InvestigationInput, result: InvestigationResult
     case "null-guard": {
       const { fnName, path, prop, returnsProp } = plan;
       const missing = path.length ? "{}" : "undefined";
+      const inferredObject = inferObjectReturn(input.code, plan.rootParam, path, prop);
+      const normalInput = inferredObject?.input ?? nested(path, prop, sample(prop));
       const cases: Case[] = [
         {
           title: "works when the data is complete (normal case)",
           body: returnsProp
-            ? [`expect(${fnName}(${jsLiteral(nested(path, prop, sample(prop)))})).toBe(${JSON.stringify(sample(prop))});`]
-            : [`expect(() => ${fnName}(${jsLiteral(nested(path, prop, sample(prop)))})).not.toThrow();`],
+            ? [`expect(${fnName}(${jsLiteral(normalInput)})).toBe(${JSON.stringify(sample(prop))});`]
+            : inferredObject
+              ? [`expect(${fnName}(${jsLiteral(normalInput)})).toEqual(${jsLiteral(inferredObject.expected)});`]
+              : [`expect(() => ${fnName}(${jsLiteral(normalInput)})).not.toThrow();`],
         },
         {
           title: path.length ? `does not throw when ${path.join(".")} is missing (the bug)` : "does not throw when the value is missing (the bug)",
-          body: returnsProp
-            ? [`expect(() => ${fnName}(${missing})).not.toThrow();`, `expect(${fnName}(${missing})).toBeNull();`]
-            : [`expect(() => ${fnName}(${missing})).not.toThrow();`],
+          body: [`expect(() => ${fnName}(${missing})).not.toThrow();`, `expect(${fnName}(${missing})).toBeNull();`],
         },
         {
           title: "does not throw when the input itself is undefined",
