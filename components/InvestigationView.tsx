@@ -13,6 +13,7 @@ import { Notice } from "./Notice";
 import { RecordGate } from "./RecordGate";
 import { Stepper } from "./Stepper";
 import { btnPrimary, btnSecondary, card } from "./ui";
+import { isGeneratedTestForLanguage } from "@/lib/validate";
 
 function Section({ icon, title, children }: { icon: string; title: string; children: React.ReactNode }) {
   return (
@@ -29,6 +30,7 @@ function Section({ icon, title, children }: { icon: string; title: string; child
 function View({ record }: { record: InvestigationRecord }) {
   const router = useRouter();
   const { result, input } = record;
+  const savedTestIsCompatible = Boolean(record.test && isGeneratedTestForLanguage(input.language, record.test));
   const [busy, setBusy] = useState(false);
   const [reanalyzing, setReanalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -68,7 +70,7 @@ function View({ record }: { record: InvestigationRecord }) {
   }
 
   async function onGenerateTest() {
-    if (record.test) return router.push(`/investigation/${record.id}/test`);
+    if (savedTestIsCompatible) return router.push(`/investigation/${record.id}/test`);
     setBusy(true);
     setError(null);
     try {
@@ -111,7 +113,7 @@ function View({ record }: { record: InvestigationRecord }) {
                   {reanalyzing ? "Analyzing…" : "Analyze Again"}
                 </button>
                 <button type="button" onClick={onGenerateTest} disabled={busy} className={btnPrimary} aria-busy={busy}>
-                  {busy ? "Generating…" : record.test ? "View Test" : "Generate Test"}
+                  {busy ? "Generating…" : savedTestIsCompatible ? "View Test" : record.test ? "Regenerate Test" : "Generate Test"}
                 </button>
               </>
             }

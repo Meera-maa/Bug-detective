@@ -3,7 +3,7 @@ import { analyze } from "@/lib/ai/mock/analyzer";
 import { buildTest } from "@/lib/ai/mock/tests";
 import { DEMOS } from "@/lib/demos";
 import { runSync } from "@/lib/runner/harness";
-import { parseGeneratedTest, parseInvestigationResult } from "@/lib/validate";
+import { isGeneratedTestForLanguage, parseGeneratedTest, parseInvestigationResult } from "@/lib/validate";
 
 describe.each(DEMOS)("demo: $title", (demo) => {
   const { result, plan } = analyze(demo.input);
@@ -123,6 +123,7 @@ console.log(userName);`,
     expect(test.code).toContain("from solution import calculate");
     expect(test.code).not.toContain("vitest");
     expect(parseGeneratedTest(test).ok).toBe(true);
+    expect(isGeneratedTestForLanguage(input.language, test)).toBe(true);
   });
 
   it("generates a native JUnit template", () => {
@@ -134,6 +135,85 @@ console.log(userName);`,
     expect(test.code).toContain("org.junit.jupiter.api.Test");
     expect(test.code).not.toContain("vitest");
     expect(parseGeneratedTest(test).ok).toBe(true);
+    expect(isGeneratedTestForLanguage(input.language, test)).toBe(true);
+  });
+
+  it("does not reuse a legacy JavaScript test for Python or Java records", () => {
+    const legacyTest = {
+      filename: "yourFunction.test.js",
+      framework: "Vitest (also works with Jest)",
+      code: "import { describe, it, expect } from \"vitest\";",
+      covers: [],
+    };
+    expect(isGeneratedTestForLanguage("Python", legacyTest)).toBe(false);
+    expect(isGeneratedTestForLanguage("Java", legacyTest)).toBe(false);
+    expect(isGeneratedTestForLanguage("JavaScript", legacyTest)).toBe(true);
+  });
+
+  it("generates a pytest-compatible .py test for the supplied Python TypeError case", () => {
+    const input = {
+      language: "Python" as const,
+      error: "TypeError: unsupported operand type(s) for +: 'int' and 'str'",
+      code: `def calculate_total(price, quantity):
+    subtotal = price + quantity
+    return subtotal
+
+def create_order(product, price, quantity):
+    total = calculate_total(price, quantity)
+    return {
+        "product": product,
+        "price": price,
+        "quantity": quantity,
+        "total": total
+    }
+
+order = create_order("Laptop", 1000, "2")
+print("Product:", order["product"])
+print("Total:", order["total"])`,
+      expectedResult: "2000",
+      actualResult: "TypeError",
+    };
+    const { result, plan } = analyze(input);
+    const test = buildTest(input, result, plan);
+
+    expect(test.filename).toBe("test_calculate_total.py");
+    expect(test.framework).toMatch(/pytest|unittest/i);
+    expect(test.code).not.toMatch(/vitest|jest|\.test\.js/i);
+    expect(isGeneratedTestForLanguage("Python", test)).toBe(true);
+  });
+
+  it("generates a JUnit .java test for the supplied Java NullPointerException case", () => {
+    const input = {
+      language: "Java" as const,
+      error: "java.lang.NullPointerException",
+      code: `public class UserService {
+
+    public static String getUserName(String name) {
+        return name.toUpperCase();
+    }
+
+    public static String displayUser(String name) {
+        String userName = getUserName(name);
+        System.out.println("User: " + userName);
+        return userName;
+    }
+
+    public static void main(String[] args) {
+        String name = null;
+        displayUser(name);
+    }
+}`,
+      expectedResult: "UNKNOWN",
+      actualResult: "NullPointerException",
+    };
+    const { result, plan } = analyze(input);
+    const test = buildTest(input, result, plan);
+
+    expect(test.filename).toBe("YourClassTest.java");
+    expect(test.framework).toMatch(/junit/i);
+    expect(test.code).toContain("org.junit.jupiter.api.Test");
+    expect(test.code).not.toMatch(/vitest|jest|\.test\.js/i);
+    expect(isGeneratedTestForLanguage("Java", test)).toBe(true);
   });
 
   it("handles a ReferenceError", () => {
@@ -418,6 +498,71 @@ describe("pattern: null-guard test checks the missing and normal profile contrac
     expect(before.ok && before.results.some((test) => !test.passed)).toBe(true);
     expect(after.ok).toBe(true);
     if (after.ok) expect(after.results.filter((test) => !test.passed)).toEqual([]);
+  });
+});
+
+describe("pattern: null-guard tests follow a string fallback in the suggested fix", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "TypeError: Cannot read properties of undefined (reading 'email')",
+    code: "function getUserEmail(user) {\n  return user.email;\n}",
+  };
+  const analysis = analyze(input);
+  const result = {
+    ...analysis.result,
+    fixedCode: analysis.result.fixedCode?.replace("return null;", 'return "User not found";'),
+  };
+  const test = buildTest(input, result, analysis.plan);
+
+  it("expects the fix's missing-user string and a valid user's email", () => {
+    expect(test.code).toContain('expect(getUserEmail(undefined)).toBe("User not found")');
+    expect(test.code).toContain('expect(getUserEmail({ email: "meera@example.com" })).toBe("meera@example.com")');
+    expect(test.code).toContain("expect(() => getUserEmail(undefined)).not.toThrow()");
+    expect(test.code).not.toContain("toBeNull()");
+    expect(test.code).not.toContain("toBeUndefined()");
+  });
+
+  it("fails on the original bug and passes with the matching return contract", () => {
+    const before = runSync(input.code, test.code);
+    const after = runSync(result.fixedCode ?? "", test.code);
+    expect(before.ok).toBe(true);
+    expect(before.ok && before.results.some((entry) => !entry.passed)).toBe(true);
+    expect(after.ok).toBe(true);
+    if (after.ok) expect(after.results.filter((entry) => !entry.passed)).toEqual([]);
+  });
+});
+
+describe("pattern: generic user lookup tests match missing and existing email contracts", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "TypeError: Cannot read properties of undefined (reading 'email')",
+    code: `function getUserEmail(userId, users) {
+    const user = users.find(user => user.id === userId);
+    return user.email;
+}
+
+const users = [
+    { id: 1, name: "Meera", email: "meera@example.com" },
+    { id: 2, name: "Ahmed", email: "ahmed@example.com" }
+];`,
+  };
+  const { result, plan } = analyze(input);
+  const test = buildTest(input, result, plan);
+
+  it("expects the fixed missing-user contract and actual existing user's email", () => {
+    expect(plan.kind).toBe("generic");
+    expect(test.code).toContain("getUserEmail(5, __bugDetectiveUsers)).not.toThrow()");
+    expect(test.code).toContain('expect(getUserEmail(5, __bugDetectiveUsers)).toBe(null)');
+    expect(test.code).toContain('expect(getUserEmail(1, __bugDetectiveUsers)).toBe("meera@example.com")');
+  });
+
+  it("reproduces the original bug and passes with the suggested fix", () => {
+    const before = runSync(input.code, test.code);
+    const after = runSync(result.fixedCode ?? "", test.code);
+    expect(before.ok).toBe(true);
+    expect(before.ok && before.results.some((entry) => !entry.passed)).toBe(true);
+    expect(after.ok).toBe(true);
+    if (after.ok) expect(after.results.filter((entry) => !entry.passed)).toEqual([]);
   });
 });
 

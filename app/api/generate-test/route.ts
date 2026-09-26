@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getProvider } from "@/lib/ai";
 import { PROVIDER_TIMEOUT_MS, fail, providerFailure, withTimeout } from "@/lib/api-helpers";
-import { parseGeneratedTest, parseInvestigationInput, parseInvestigationResult } from "@/lib/validate";
+import { isGeneratedTestForLanguage, parseGeneratedTest, parseInvestigationInput, parseInvestigationResult } from "@/lib/validate";
 
 export async function POST(request: Request) {
   let body: unknown;
@@ -25,6 +25,9 @@ export async function POST(request: Request) {
       console.error("[bug-detective] malformed AI test response:", parsed.message);
       console.error("[bug-detective] raw test response:", raw);
       return fail("MALFORMED_RESPONSE", "The AI response could not be understood. Please try again.");
+    }
+    if (!isGeneratedTestForLanguage(input.value.language, parsed.value)) {
+      return fail("MALFORMED_RESPONSE", `The generated ${input.value.language} test used the wrong file type or test framework. Please try generating it again.`);
     }
     return NextResponse.json({ test: parsed.value, provider: provider.name });
   } catch (e) {

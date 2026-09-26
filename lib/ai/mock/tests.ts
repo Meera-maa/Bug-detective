@@ -55,6 +55,62 @@ function inferObjectReturn(code: string, rootParam: string, path: string[], prop
   return { input, expected };
 }
 
+function inferGuardReturn(fixedCode: string | undefined, rootParam: string): string | undefined {
+  if (!fixedCode) return undefined;
+  const guard = new RegExp(`if\\s*\\(\\s*!\\s*${escapeRegExp(rootParam)}\\s*\\)\\s*\\{([\\s\\S]*?)\\}`).exec(fixedCode)?.[1];
+  const value = guard
+    ? /\breturn\s+(null|undefined|true|false|-?(?:\d+(?:\.\d*)?|\.\d+)|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)\s*;/.exec(guard)?.[1]
+    : undefined;
+  if (!value) return undefined;
+  if (value.startsWith("`")) {
+    const content = value.slice(1, -1);
+    return content.includes("${") ? undefined : JSON.stringify(content);
+  }
+  return value;
+}
+
+function buildMissingLookupTest(input: InvestigationInput, result: InvestigationResult, fnName: string, ext: string, framework: string): GeneratedTest | null {
+  const signature = new RegExp(`(?:async\\s+)?function\\s+${escapeRegExp(fnName)}\\s*\\(([^)]*)\\)`).exec(input.code);
+  const lookup = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\.find\(\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*=>\s*\3\.([A-Za-z_$][\w$]*)\s*===?\s*([A-Za-z_$][\w$]*)\s*\)/.exec(input.code);
+  const missingReturn = lookup ? inferGuardReturn(result.fixedCode, lookup[1]) : undefined;
+  const property = /reading '([^']+)'/.exec(input.error)?.[1];
+  if (!signature || !lookup || !missingReturn || !property) return null;
+
+  const params = signature[1].split(",").map((param) => param.trim());
+  const usersParamIndex = params.indexOf(lookup[2]);
+  const userIdParamIndex = params.indexOf(lookup[5]);
+  if (usersParamIndex < 0 || userIdParamIndex < 0 || usersParamIndex === userIdParamIndex) return null;
+
+  const usersName = "__bugDetectiveUsers";
+  const argsFor = (id: number) => params.map((_, index) =>
+    index === usersParamIndex ? usersName : index === userIdParamIndex ? String(id) : "undefined",
+  ).join(", ");
+  const missingCall = `${fnName}(${argsFor(5)})`;
+  const normalCall = `${fnName}(${argsFor(1)})`;
+  const users = [
+    `{ id: 1, name: "Meera", email: "meera@example.com", role: "user" }`,
+    `{ id: 2, name: "Ahmed", email: "ahmed@example.com", role: "user" }`,
+  ].join(", ");
+
+  const cases: Case[] = [
+    {
+      title: "does not throw and returns the suggested value when the user is missing",
+      body: [`const ${usersName} = [${users}];`, `expect(() => ${missingCall}).not.toThrow();`, `expect(${missingCall}).toBe(${missingReturn});`],
+    },
+    {
+      title: "returns the email for an existing user",
+      body: [`const ${usersName} = [${users}];`, `expect(${normalCall}).toBe(${JSON.stringify(sample(property))});`],
+    },
+  ];
+
+  return {
+    framework,
+    filename: `${fnName}.test.${ext}`,
+    code: render(fnName, result.problem, ext, cases),
+    covers: ["Missing user (the original bug and fixed return contract)", "Existing user returns the expected email"],
+  };
+}
+
 export function buildTest(input: InvestigationInput, result: InvestigationResult, plan: TestPlan): GeneratedTest {
   if (input.language === "Python") return buildPythonTest(input, plan);
   if (input.language === "Java") return buildJavaTest(plan);
@@ -62,11 +118,17 @@ export function buildTest(input: InvestigationInput, result: InvestigationResult
   const ext = input.language === "TypeScript" ? "ts" : "js";
   const framework = "Vitest (also works with Jest)";
 
+  if (input.language === "JavaScript" && plan.kind === "generic" && plan.fnName) {
+    const missingLookupTest = buildMissingLookupTest(input, result, plan.fnName, ext, framework);
+    if (missingLookupTest) return missingLookupTest;
+  }
+
   switch (plan.kind) {
     case "null-guard": {
       const { fnName, path, prop, returnsProp } = plan;
       const missing = path.length ? "{}" : "undefined";
       const inferredObject = inferObjectReturn(input.code, plan.rootParam, path, prop);
+      const missingReturn = input.language === "JavaScript" ? inferGuardReturn(result.fixedCode, plan.rootParam) : "null";
       const normalInput = inferredObject?.input ?? nested(path, prop, sample(prop));
       const cases: Case[] = [
         {
@@ -79,7 +141,16 @@ export function buildTest(input: InvestigationInput, result: InvestigationResult
         },
         {
           title: path.length ? `does not throw when ${path.join(".")} is missing (the bug)` : "does not throw when the value is missing (the bug)",
-          body: [`expect(() => ${fnName}(${missing})).not.toThrow();`, `expect(${fnName}(${missing})).toBeNull();`],
+          body: [
+            `expect(() => ${fnName}(${missing})).not.toThrow();`,
+            ...(missingReturn === "null"
+              ? [`expect(${fnName}(${missing})).toBeNull();`]
+              : missingReturn === "undefined"
+                ? [`expect(${fnName}(${missing})).toBeUndefined();`]
+                : missingReturn
+                  ? [`expect(${fnName}(${missing})).toBe(${missingReturn});`]
+                  : []),
+          ],
         },
         {
           title: "does not throw when the input itself is undefined",

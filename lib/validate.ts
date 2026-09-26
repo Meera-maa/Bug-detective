@@ -108,6 +108,23 @@ export function parseGeneratedTest(raw: unknown): Parsed<GeneratedTest> {
   return { ok: true, value: { framework, filename, code, covers } };
 }
 
+export function isGeneratedTestForLanguage(language: Language, test: GeneratedTest): boolean {
+  const filename = test.filename.toLowerCase();
+  const format = `${test.framework}\n${test.code}`.toLowerCase();
+  switch (language) {
+    case "JavaScript":
+      return filename.endsWith(".test.js") && /vitest|jest/.test(format);
+    case "TypeScript":
+      return filename.endsWith(".test.ts") && /vitest|jest/.test(format);
+    case "Python":
+      return filename.endsWith(".py") && /pytest|unittest/.test(format) && !/vitest|jest/.test(format);
+    case "Java":
+      return filename.endsWith(".java") && /junit/.test(format) && !/vitest|jest/.test(format);
+    case "Other":
+      return true;
+  }
+}
+
 /** Pulls a JSON object out of text that may be wrapped in ```json fences or prose. */
 export function extractJson(text: string): unknown {
   const cleaned = text.replace(/```json|```/gi, "").trim();

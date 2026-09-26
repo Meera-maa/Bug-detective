@@ -14,11 +14,16 @@ import { Notice } from "./Notice";
 import { RecordGate } from "./RecordGate";
 import { Stepper } from "./Stepper";
 import { btnPrimary, btnSecondary, card } from "./ui";
+import { isGeneratedTestForLanguage } from "@/lib/validate";
 
 type Verification = { before: RunReport; after: RunReport };
 
-function summarize(report: RunReport): { pass: boolean; label: string; detail: string; cases: TestCaseResult[] } {
-  if (!report.ok) return { pass: false, label: "ERROR", detail: report.error, cases: [] };
+function summarize(report: RunReport, originalBugExpected = false): { pass: boolean; label: string; detail: string; cases: TestCaseResult[] } {
+  if (!report.ok) {
+    return originalBugExpected
+      ? { pass: false, label: "FAIL ✕", detail: `Bug reproduced: ${report.error}`, cases: [] }
+      : { pass: false, label: "ERROR", detail: report.error, cases: [] };
+  }
   const failed = report.results.filter((r) => !r.passed).length;
   const total = report.results.length;
   return {
@@ -29,8 +34,8 @@ function summarize(report: RunReport): { pass: boolean; label: string; detail: s
   };
 }
 
-function RunRow({ title, note, report }: { title: string; note: string; report: RunReport }) {
-  const s = summarize(report);
+function RunRow({ title, note, report, originalBugExpected = false }: { title: string; note: string; report: RunReport; originalBugExpected?: boolean }) {
+  const s = summarize(report, originalBugExpected);
   return (
     <div className="rounded-lg border border-line bg-code">
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
@@ -73,7 +78,9 @@ function View({ record }: { record: InvestigationRecord }) {
   const [running, setRunning] = useState(false);
   const [verification, setVerification] = useState<Verification | null>(null);
 
-  const isTemplate = test ? /(?:\/\/|#) TODO/.test(test.code) : false;
+  const compatibleTest = test && isGeneratedTestForLanguage(input.language, test) ? test : undefined;
+  const testMatchesLanguage = Boolean(compatibleTest);
+  const isTemplate = compatibleTest ? /(?:\/\/|#) TODO/.test(compatibleTest.code) : false;
   const localCommand = input.language === "Python"
     ? `pytest ${test?.filename ?? "test_<function>.py"}`
     : input.language === "Java"
@@ -85,17 +92,25 @@ function View({ record }: { record: InvestigationRecord }) {
       ? "Run test locally with JUnit"
       : "Run test locally with Vitest";
   const runBlocker =
-    input.language !== "JavaScript"
-      ? `In-browser running supports JavaScript only. Run this ${input.language} test in your local project.`
+    !testMatchesLanguage
+      ? `The saved test does not match ${input.language}. Regenerate it before running.`
+      : input.language === "Python"
+        ? "Python tests run locally with pytest; they are not executed in the browser."
+        : input.language === "Java"
+          ? "Java tests run locally with JUnit; they are not executed in the browser."
+          : input.language === "TypeScript"
+            ? "TypeScript tests run locally with Vitest; they are not executed in the browser."
       : !result.fixedCode
         ? "There is no automatic fix to run the test against."
         : isTemplate
           ? "This test is a template. Fill in the TODO values first, then run it locally."
           : null;
 
-  const before = verification ? summarize(verification.before) : null;
+  const before = verification ? summarize(verification.before, verification.after.ok) : null;
   const after = verification ? summarize(verification.after) : null;
-  const beforeFailed = verification?.before.ok === true && !before!.pass;
+  const beforeFailed = verification
+    ? verification.before.ok ? !before!.pass : verification.after.ok
+    : false;
   const verified = Boolean(verification && beforeFailed && after?.pass);
 
   function onStartNewInvestigation() {
@@ -108,7 +123,11 @@ function View({ record }: { record: InvestigationRecord }) {
     setBusy(true);
     setGenError(null);
     try {
-      attachTest(record.id, await generateTest(input, result));
+      const generated = await generateTest(input, result);
+      if (!isGeneratedTestForLanguage(input.language, generated)) {
+        throw new UserFacingError(`The generated ${input.language} test did not use its required file type and test framework. Please try again.`, "MALFORMED_RESPONSE");
+      }
+      attachTest(record.id, generated);
     } catch (e) {
       setGenError(e instanceof UserFacingError ? e.message : "The test could not be generated. Please try again.");
     } finally {
@@ -117,11 +136,11 @@ function View({ record }: { record: InvestigationRecord }) {
   }
 
   async function onRun() {
-    if (!test || !result.fixedCode) return;
+    if (!compatibleTest || !result.fixedCode) return;
     setRunning(true);
     setVerification(null);
-    const beforeReport = await runInWorker(input.code, test.code);
-    const afterReport = await runInWorker(result.fixedCode, test.code);
+    const beforeReport = await runInWorker(input.code, compatibleTest.code);
+    const afterReport = await runInWorker(result.fixedCode, compatibleTest.code);
     setVerification({ before: beforeReport, after: afterReport });
     setRunning(false);
   }
@@ -150,9 +169,9 @@ function View({ record }: { record: InvestigationRecord }) {
         <div className={`${card} px-4 py-4 sm:px-6`}>
           <Stepper
             done={verification ? 5 : test ? 4 : 3}
-            actions={test ? (
+            actions={compatibleTest ? (
               <>
-                <CopyButton text={test.code} label="Copy Test" />
+                <CopyButton text={compatibleTest.code} label="Copy Test" />
                 {input.language === "JavaScript" ? (
                   <button type="button" onClick={onRun} disabled={running || !result.fixedCode} className={btnPrimary} aria-busy={running}>
                     {running ? "Verifying…" : verification ? "Run Again" : "Verify"}
@@ -165,18 +184,20 @@ function View({ record }: { record: InvestigationRecord }) {
               </>
             ) : (
               <button type="button" onClick={onGenerate} disabled={busy} className={btnPrimary} aria-busy={busy}>
-                {busy ? "Generating…" : "Generate Test"}
+                {busy ? "Generating…" : test ? "Regenerate Test" : "Generate Test"}
               </button>
             )}
           />
         </div>
       </header>
 
-      {!test ? (
+      {!compatibleTest ? (
         <div className={`${card} space-y-3 p-8 text-center`}>
-          <h2 className="text-lg font-semibold">No test generated yet</h2>
+          <h2 className="text-lg font-semibold">{test ? "Test format mismatch" : "No test generated yet"}</h2>
           <p className="mx-auto max-w-md text-sm leading-relaxed text-muted">
-            A regression test reproduces this bug so it cannot come back unnoticed.
+            {test
+              ? `This saved file does not match ${input.language}. Generate a native ${input.language} test to continue.`
+              : "A regression test reproduces this bug so it cannot come back unnoticed."}
           </p>
           {genError && (
             <div className="mx-auto max-w-md text-left">
@@ -200,8 +221,8 @@ function View({ record }: { record: InvestigationRecord }) {
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
           <div className="space-y-6">
             <CodeBlock
-              code={test.code}
-              label={test.filename}
+              code={compatibleTest.code}
+              label={compatibleTest.filename}
               maxHeight="34rem"
             />
             {isTemplate && (
@@ -215,11 +236,11 @@ function View({ record }: { record: InvestigationRecord }) {
             <section className={`${card} space-y-3 p-5`}>
               <h2 className="text-base font-semibold">What it covers</h2>
               <ul className="list-disc space-y-1.5 pl-5 text-sm text-ink/90 marker:text-faint">
-                {test.covers.map((c, i) => (
+                {compatibleTest.covers.map((c, i) => (
                   <li key={i}>{c}</li>
                 ))}
               </ul>
-              <p className="text-xs text-muted">Framework: {test.framework}</p>
+              <p className="text-xs text-muted">Framework: {compatibleTest.framework}</p>
             </section>
 
             <section className={`${card} space-y-3 p-5`} aria-labelledby="verify-heading">
@@ -231,13 +252,15 @@ function View({ record }: { record: InvestigationRecord }) {
                   <Notice tone="info" title="Test generated. Run it locally.">
                     {runBlocker}
                   </Notice>
-                  <div id="local-run-command" className="space-y-2 rounded-md border border-line bg-code p-3">
-                    <p className="text-xs text-muted">Save the test as {test.filename}, then run this from your project root:</p>
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <code className="min-w-0 break-all font-mono text-xs text-ink">{localCommand}</code>
-                      <CopyButton text={localCommand} label="Copy command" />
+                  {compatibleTest && (
+                    <div id="local-run-command" className="space-y-2 rounded-md border border-line bg-code p-3">
+                      <p className="text-xs text-muted">Save the test as {compatibleTest.filename}, then run this from your project root:</p>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <code className="min-w-0 break-all font-mono text-xs text-ink">{localCommand}</code>
+                        <CopyButton text={localCommand} label="Copy command" />
+                      </div>
                     </div>
-                  </div>
+                  )}
                   {(input.language === "Python" || input.language === "Java") && (
                     <p className="text-xs text-muted">
                       {input.language === "Python"
@@ -260,16 +283,21 @@ function View({ record }: { record: InvestigationRecord }) {
                 Verification
               </h2>
               <div className="grid gap-3 md:grid-cols-2">
-                <RunRow title="Original code" note="Expected to fail: the test reproduces the bug" report={verification.before} />
+                <RunRow
+                  title="Original code"
+                  note={beforeFailed ? "Test failed — bug reproduced" : "Expected to fail: the test reproduces the bug"}
+                  report={verification.before}
+                  originalBugExpected={verification.after.ok}
+                />
                 <RunRow title="With the suggested fix" note="Expected to pass" report={verification.after} />
               </div>
               {verified ? (
                 <Notice tone="success" title="Verified">
                   The test fails on the original code and passes with the fix, so the fix resolves this bug.
                 </Notice>
-              ) : !verification.before.ok || !verification.after.ok ? (
+              ) : !verification.after.ok ? (
                 <Notice tone="error" title="The test could not run cleanly">
-                  Check the error above. The pasted code may not be valid standalone JavaScript.
+                  The suggested-fix test could not be executed. Check the runner error above.
                 </Notice>
               ) : !beforeFailed ? (
                 <Notice tone="warning" title="The test does not reproduce the bug">
