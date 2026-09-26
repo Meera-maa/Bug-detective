@@ -23,6 +23,7 @@ export async function POST(request: Request) {
     const parsed = parseGeneratedTest(raw);
     if (!parsed.ok) {
       console.error("[bug-detective] malformed AI test response:", parsed.message);
+      console.error("[bug-detective] raw test response:", raw);
       return fail("MALFORMED_RESPONSE", "The AI response could not be understood. Please try again.");
     }
     return NextResponse.json({ test: parsed.value, provider: provider.name });

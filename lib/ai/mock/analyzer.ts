@@ -56,7 +56,14 @@ export type TestPlan =
   | { kind: "empty-collection"; fnName: string; param: string; prop: string; returnsProp: boolean }
   | { kind: "not-a-function"; fnName?: string; callee: string }
   | { kind: "stack-overflow"; fnName: string }
-  | { kind: "generic"; fnName?: string };
+| {
+    kind: "logic-error";
+    fnName: string;
+    args: number[];
+    expected: number;
+    actual: number;
+  }
+| { kind: "generic"; fnName?: string };
 
 export type Analysis = { result: InvestigationResult; plan: TestPlan };
 
@@ -1452,7 +1459,7 @@ function analyzeLogicError(input: InvestigationInput, combined: string): Analysi
   const bothNumeric = !Number.isNaN(expectedNum) && !Number.isNaN(actualNum);
 
   let operatorFix: { from: ArithOp; to: ArithOp; left: string; right: string; lineN: number } | null = null;
-
+  let fnArgs: number[] = [];
   if (bothNumeric && hasExpectedActual) {
     const arith = parseArithReturn(lines);
     if (arith) {
@@ -1461,7 +1468,11 @@ function analyzeLogicError(input: InvestigationInput, combined: string): Analysi
       // Try to resolve the parameter values from a visible call site.
       const fn = findEnclosingFunction(lines, arith.lineN);
       const argMap = fn ? extractCallArgs(lines, fn.name, fn.params) : null;
-
+    fnArgs = fn && argMap
+  ? fn.params
+      .map((param) => argMap.get(param))
+      .filter((value): value is number => value !== undefined)
+  : [];
       if (argMap && argMap.has(arith.left) && argMap.has(arith.right)) {
         const a = argMap.get(arith.left)!;
         const b = argMap.get(arith.right)!;
@@ -1628,7 +1639,13 @@ function analyzeLogicError(input: InvestigationInput, combined: string): Analysi
     : `Cover: a normal input that produces the correct result${expectedStr ? ` (expected: \`${expectedStr}\`)` : ""}; the input that triggered the error${actualStr ? ` (actual: \`${actualStr}\`)` : ""}; and boundary values (zero, empty, \`null\`, \`NaN\`).`;
 
   return {
-    plan: { kind: "generic", fnName },
+    plan: {
+  kind: "logic-error",
+  fnName: fnName ?? "yourFunction",
+  args: fnArgs,
+  expected: expectedNum,
+  actual: actualNum,
+},
     result: {
       problem,
       rootCause,

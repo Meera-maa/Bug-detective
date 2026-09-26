@@ -218,6 +218,41 @@ export function buildTest(input: InvestigationInput, result: InvestigationResult
       };
     }
 
+    case "logic-error": {
+  const fnName = plan.fnName;
+  const args = plan.args.map((value) => JSON.stringify(value)).join(", ");
+
+  const code = [
+    `import { describe, it, expect } from "vitest";`,
+    `import { ${fnName} } from "./${fnName}";`,
+    ``,
+    `describe(${JSON.stringify(fnName)}, () => {`,
+    `  it("returns the expected result for the failing input", () => {`,
+    `    expect(${fnName}(${args})).toBe(${JSON.stringify(plan.expected)});`,
+    `  });`,
+    ``,
+    `  it("handles zero input", () => {`,
+    `    expect(${fnName}(${plan.args.map((value, index) => index === plan.args.length - 1 ? "0" : JSON.stringify(value)).join(", ")})).toBe(0);`,
+    `  });`,
+    ``,
+    `  it("handles a negative input", () => {`,
+    `    expect(${fnName}(${plan.args.map((value, index) => index === plan.args.length - 1 ? "-1" : JSON.stringify(value)).join(", ")})).toBeLessThan(0);`,
+    `  });`,
+    `});`,
+    ``,
+  ].join("\n");
+
+  return {
+    framework,
+    filename: `${fnName}.test.${ext}`,
+    code,
+    covers: [
+      "The original failing input",
+      "Zero input",
+      "Negative input",
+    ],
+  };
+}
     case "generic": {
       const fnName = plan.fnName ?? "yourFunction";
       // The generic plan does not have enough information to produce concrete test values.
