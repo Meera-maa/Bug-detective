@@ -584,7 +584,17 @@ function analyzeReferenceError(input: InvestigationInput, combined: string, name
 function analyzeGeneric(input: InvestigationInput, combined: string, isJsLike: boolean): Analysis {
   const lines = toLines(input.code);
   const headline = firstLine(input.error);
-  const frame = parseStackFrame(input.stackTrace ?? combined);
+  const frame = input.language === "Python"
+    ? (() => {
+        const parsed = lastPythonFrame(combined);
+        return parsed ? { ...parsed, col: 1 } : parseStackFrame(input.stackTrace ?? combined);
+      })()
+    : input.language === "Java"
+      ? (() => {
+          const parsed = lastJavaFrame(combined);
+          return parsed ? { fn: parsed.method, file: parsed.file, line: parsed.line, col: 1 } : parseStackFrame(input.stackTrace ?? combined);
+        })()
+      : parseStackFrame(input.stackTrace ?? combined);
   const kind = /^\s*([A-Za-z]*(?:Error|Exception))\b/.exec(headline)?.[1];
   const status = /\b([45]\d{2})\b/.exec(headline)?.[1];
   const stackLine = frame ? lines.find((l) => l.n === frame.line) : undefined;
@@ -631,13 +641,18 @@ function analyzeGeneric(input: InvestigationInput, combined: string, isJsLike: b
       // The specific Python/Java patterns did not match — be honest that this particular
       // error is not yet recognised, rather than claiming no support at all.
       evidence.push(`The built-in analyzer has partial ${input.language} support but does not recognise this specific error pattern. The clues below are taken from the raw input.`);
-      rootCause = `This ${input.language} error is not yet covered by the built-in analyzer's named patterns. The evidence below is based on the error message and stack trace. For a precise diagnosis, consult your ${input.language} documentation or a ${input.language}-aware tool.`;
+      rootCause = stackLine
+        ? `This ${input.language} error is not yet covered by a named pattern, but the stack trace points to line ${stackLine.n} (\`${truncate(stackLine.text)}\`). Inspect the values and operations on that line. For a more specific diagnosis, consult your ${input.language} documentation or a ${input.language}-aware tool.`
+        : `This ${input.language} error is not yet covered by the built-in analyzer's named patterns. The evidence below is based on the error message and stack trace. For a precise diagnosis, consult your ${input.language} documentation or a ${input.language}-aware tool.`;
+      confidence = stackLine ? "Medium" : "Low";
     } else {
       // "Other" language — no named patterns at all.
       evidence.push(`The built-in analyzer only understands JavaScript and TypeScript patterns, so it cannot analyse ${input.language} code.`);
       rootCause = `The built-in analyzer only understands JavaScript and TypeScript patterns and cannot diagnose ${input.language} code. The evidence below is taken from the raw input.`;
     }
-    suggestedFix = `Use the error message and the stack trace line to locate the problem. Search for \`${truncate(headline, 60)}\` in your ${input.language} documentation for language-specific guidance.`;
+    suggestedFix = stackLine
+      ? `Start with line ${stackLine.n} (\`${truncate(stackLine.text)}\`) identified by the stack trace, then inspect the values used there. Search for \`${truncate(headline, 60)}\` in your ${input.language} documentation for language-specific guidance.`
+      : `Use the error message and the stack trace line to locate the problem. Search for \`${truncate(headline, 60)}\` in your ${input.language} documentation for language-specific guidance.`;
     testSuggestion = `Once the cause is identified, write a test that reproduces the error scenario and confirm it passes after the fix.`;
     if (!stackLine && !frame) {
       evidence.push(`No stack trace was provided. Include the full stack trace for a more precise diagnosis.`);

@@ -66,6 +66,50 @@ describe("robustness", () => {
     expect(result.evidence.some((e) => /None|NoneType|attribute/i.test(e))).toBe(true);
   });
 
+  it.each([
+    {
+      language: "Python" as const,
+      error: "RuntimeError: unexpected failure",
+      stackTrace: 'Traceback (most recent call last):\n  File "app.py", line 2, in calculate\n    return value + 1',
+      code: "def calculate(value):\n    return value + 1",
+    },
+    {
+      language: "Java" as const,
+      error: "IllegalStateException: unexpected failure",
+      stackTrace: "at Example.calculate(Example.java:3)",
+      code: "class Example {\n    int calculate(int value) {\n        return value + 1;\n    }\n}",
+    },
+  ])("uses a language stack frame to locate an unrecognised $language error", (input) => {
+    const { result } = analyze(input);
+    expect(result.confidence).toBe("Medium");
+    expect(result.evidence.some((entry) => /stack trace points to/i.test(entry))).toBe(true);
+    expect(result.rootCause).toContain("line");
+  });
+
+  it("generates a native Python unittest template", () => {
+    const input = { language: "Python" as const, error: "RuntimeError: failed", code: "def calculate(value):\n    return value + 1" };
+    const { result, plan } = analyze(input);
+    const test = buildTest(input, result, plan);
+    expect(test.filename).toMatch(/^test_.*\.py$/);
+    expect(test.framework).toContain("unittest");
+    expect(test.code).toContain("import unittest");
+    expect(test.filename).toBe("test_calculate.py");
+    expect(test.code).toContain("from solution import calculate");
+    expect(test.code).not.toContain("vitest");
+    expect(parseGeneratedTest(test).ok).toBe(true);
+  });
+
+  it("generates a native JUnit template", () => {
+    const input = { language: "Java" as const, error: "IllegalStateException: failed", code: "class Example { void run() {} }" };
+    const { result, plan } = analyze(input);
+    const test = buildTest(input, result, plan);
+    expect(test.filename).toBe("YourClassTest.java");
+    expect(test.framework).toContain("JUnit");
+    expect(test.code).toContain("org.junit.jupiter.api.Test");
+    expect(test.code).not.toContain("vitest");
+    expect(parseGeneratedTest(test).ok).toBe(true);
+  });
+
   it("handles a ReferenceError", () => {
     const { result } = analyze({ language: "JavaScript", error: "ReferenceError: total is not defined", code: "function f() {\n  return total + 1;\n}" });
     expect(result.problem).toContain("total");

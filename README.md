@@ -47,6 +47,7 @@ Error → Investigate → Root cause + Evidence → Fix → Regression test → 
 - Suggested fix shown as a before/after diff
 - **Regression test generation** with a copy button
 - **Run Test** executes the test in a sandboxed Web Worker and shows PASS ✓ / FAIL ✕ on the original and the fixed code. Only real results are shown, never fake ones.
+- Python and Java regression tests are generated as native `unittest` and JUnit 5 templates for local execution. See **[Local test instructions](docs/local-testing.md)**.
 - Recent investigations saved in `localStorage` (no database, no login)
 - Three one-click demo bugs
 
@@ -131,7 +132,7 @@ It never fabricates a root cause it cannot point to in the pasted input.
 - **Python** — partial support: `IndexError`, `KeyError`, `TypeError`, `NameError`, `AttributeError`, `ZeroDivisionError`, `ValueError`. Unrecognised Python errors fall through to the generic reasoner.
 - **Java** — partial support: `NullPointerException`, `ArrayIndexOutOfBoundsException`, `NumberFormatException`, `ArithmeticException`, `ClassCastException`. Unrecognised Java errors fall through to the generic reasoner.
 - Other languages report evidence-based findings at `Low` confidence via the fallback reasoner.
-- **Run Test** executes JavaScript only. Python, Java, and other languages get a "run locally" state.
+- **Run Test** executes JavaScript only. Python and Java tests are generated in their native frameworks and run in your local project; other languages need a manually written test.
 
 ## Roadmap
 

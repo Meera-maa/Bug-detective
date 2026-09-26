@@ -71,10 +71,15 @@ function View({ record }: { record: InvestigationRecord }) {
   const [running, setRunning] = useState(false);
   const [verification, setVerification] = useState<Verification | null>(null);
 
-  const isTemplate = test ? /\/\/ TODO/.test(test.code) : false;
+  const isTemplate = test ? /(?:\/\/|#) TODO/.test(test.code) : false;
+  const localCommand = input.language === "Python"
+    ? `python -m unittest ${test?.filename ?? "test_<function>.py"}`
+    : input.language === "Java"
+      ? "mvn test"
+      : "npx vitest run";
   const runBlocker =
     input.language !== "JavaScript"
-      ? `In-browser running supports JavaScript only, and this investigation is ${input.language}.`
+      ? `In-browser running supports JavaScript only. Run this ${input.language} test in your local project.`
       : !result.fixedCode
         ? "There is no automatic fix to run the test against."
         : isTemplate
@@ -194,9 +199,16 @@ function View({ record }: { record: InvestigationRecord }) {
                       Save the test as <code className="rounded border border-line bg-code px-1.5 py-0.5 font-mono text-[0.85em]">{test.filename}</code>
                     </li>
                     <li>
-                      Run <code className="rounded border border-line bg-code px-1.5 py-0.5 font-mono text-[0.85em]">npx vitest run</code>
+                      Run <code className="rounded border border-line bg-code px-1.5 py-0.5 font-mono text-[0.85em]">{localCommand}</code>
                     </li>
                   </ol>
+                  {(input.language === "Python" || input.language === "Java") && (
+                    <p className="text-xs text-muted">
+                      {input.language === "Python"
+                        ? "Save the code under test as solution.py beside the test file, then replace the TODO values."
+                        : "Add JUnit 5 to your Maven project, place the test in src/test/java, then replace the TODO values."}
+                    </p>
+                  )}
                 </>
               ) : (
                 <>

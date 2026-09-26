@@ -27,6 +27,9 @@ function render(fnName: string, problem: string, ext: string, cases: Case[]): st
 }
 
 export function buildTest(input: InvestigationInput, result: InvestigationResult, plan: TestPlan): GeneratedTest {
+  if (input.language === "Python") return buildPythonTest(input, plan);
+  if (input.language === "Java") return buildJavaTest(plan);
+
   const ext = input.language === "TypeScript" ? "ts" : "js";
   const framework = "Vitest (also works with Jest)";
 
@@ -286,4 +289,68 @@ export function buildTest(input: InvestigationInput, result: InvestigationResult
       };
     }
   }
+}
+
+function buildPythonTest(input: InvestigationInput, plan: TestPlan): GeneratedTest {
+  const plannedName = plan.kind === "generic" ? plan.fnName : undefined;
+  const sourceName = /^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/m.exec(input.code)?.[1];
+  const fnName = plannedName && /^[A-Za-z_]\w*$/.test(plannedName) ? plannedName : sourceName ?? "your_function";
+  return {
+    framework: "Python unittest (standard library)",
+    filename: `test_${fnName}.py`,
+    code: [
+      "import unittest",
+      `from solution import ${fnName}  # Save the code under test as solution.py`,
+      "",
+      "",
+      "class TestGeneratedRegression(unittest.TestCase):",
+      "    def test_handles_the_failing_input_after_the_fix(self):",
+      "        failing_input = None  # TODO: replace with the input that caused the error",
+      `        ${fnName}(failing_input)  # TODO: adapt arguments if the function takes more than one`,
+      "",
+      "    def test_normal_input(self):",
+      "        normal_input = None  # TODO: replace with a valid input",
+      "        expected = None  # TODO: replace with the expected result",
+      `        self.assertEqual(${fnName}(normal_input), expected)  # TODO: adapt arguments if needed`,
+      "",
+      "",
+      'if __name__ == "__main__":',
+      "    unittest.main()",
+      "",
+    ].join("\n"),
+    covers: ["The original failing input after the fix", "A normal input and expected result"],
+  };
+}
+
+function buildJavaTest(plan: TestPlan): GeneratedTest {
+  const suggestedMethod = plan.kind === "generic" ? plan.fnName : undefined;
+  const method = suggestedMethod && /^[A-Za-z_$][\w$]*$/.test(suggestedMethod) ? suggestedMethod : "yourMethod";
+  return {
+    framework: "JUnit 5",
+    filename: "YourClassTest.java",
+    code: [
+      "import org.junit.jupiter.api.Test;",
+      "import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;",
+      "import static org.junit.jupiter.api.Assertions.assertEquals;",
+      "",
+      "class YourClassTest {",
+      "    @Test",
+      "    void handlesTheFailingInputAfterTheFix() {",
+      "        YourClass subject = new YourClass(); // TODO: replace with the class under test",
+      "        Object failingInput = null; // TODO: replace with the input that caused the error",
+      `        assertDoesNotThrow(() -> subject.${method}(failingInput)); // TODO: adapt arguments or static call`,
+      "    }",
+      "",
+      "    @Test",
+      "    void handlesNormalInput() {",
+      "        YourClass subject = new YourClass(); // TODO: replace with the class under test",
+      "        Object normalInput = null; // TODO: replace with a valid input",
+      "        Object expected = null; // TODO: replace with the expected result",
+      `        assertEquals(expected, subject.${method}(normalInput)); // TODO: adapt arguments or static call`,
+      "    }",
+      "}",
+      "",
+    ].join("\n"),
+    covers: ["The original failing input after the fix", "A normal input and expected result"],
+  };
 }
