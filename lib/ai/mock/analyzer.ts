@@ -140,6 +140,37 @@ function insertAfterLine(lines: string[], lineNumber: number, insert: string[]):
   return [...lines.slice(0, lineNumber), ...insert, ...lines.slice(lineNumber)];
 }
 
+function protectNullableCallers(code: string, fnName: string): string {
+  let lines = code.split("\n");
+  const fnCall = escapeRegExp(fnName);
+  const assignments = lines.flatMap((text, index) => {
+    const match = new RegExp(`^\\s*(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:await\\s+)?${fnCall}\\s*\\(`).exec(text);
+    return match ? [{ alias: match[1], line: index + 1 }] : [];
+  });
+
+  for (const { alias, line } of assignments) {
+    const propertyRead = new RegExp(`\\b${escapeRegExp(alias)}\\s*\\.\\s*[A-Za-z_$][\\w$]*`);
+    if (!lines.slice(line).some((text) => propertyRead.test(text))) continue;
+
+    const enclosing = findEnclosingFunction(toLines(lines.join("\n")), line);
+    if (enclosing?.signatureEndsWithBrace) {
+      const guard = new RegExp(`^\\s*if\\s*\\(\\s*!\\s*${escapeRegExp(alias)}\\s*\\)`);
+      if (!lines.slice(line).some((text) => guard.test(text))) {
+        const indent = indentOf(lines[line - 1]);
+        lines = insertAfterLine(lines, line, [`${indent}if (!${alias}) {`, `${indent}  return null;`, `${indent}}`]);
+      }
+      continue;
+    }
+
+    const aliasRead = new RegExp(`\\b${escapeRegExp(alias)}\\s*\\.(?!\\.)`, "g");
+    lines = lines.map((text, index) => index + 1 > line ? text.replace(aliasRead, `${alias}?.`) : text);
+  }
+
+  const directCallRead = new RegExp(`\\b${fnCall}\\s*\\(([^()\\n]*)\\)\\s*\\.(?!\\.)\\s*([A-Za-z_$][\\w$]*)`, "g");
+  lines = lines.map((text) => text.replace(directCallRead, `${fnName}($1)?.$2`));
+  return lines.join("\n");
+}
+
 function hasGuardBetween(lines: CodeLine[], from: number, to: number, name: string): boolean {
   const n = escapeRegExp(name);
   const guard = new RegExp(`(?:if\\s*\\(\\s*!?\\s*${n}\\b|\\b${n}\\s*(?:&&|\\?\\?|\\|\\|)|\\b${n}\\?\\.|typeof\\s+${n}\\b)`);
@@ -324,7 +355,7 @@ function analyzeVariable(ctx: Ctx): Analysis | null {
       const ind = `${indentOf(codeLines[fn.signatureLine - 1])}  `;
       out = insertAfterLine(out, fn.signatureLine, [`${ind}if (!${receiver}) {`, `${ind}  return ${fallback};`, `${ind}}`, ""]);
     }
-    fixedCode = out.join("\n");
+    fixedCode = protectNullableCallers(out.join("\n"), fn.name);
   }
 
   const rootOfSource = sourceExpr.split(/[.?[]+/)[0];

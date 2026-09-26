@@ -347,6 +347,49 @@ function handler(name) {
   });
 });
 
+describe("pattern: missing user lookup does not break the profile caller", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "TypeError: Cannot read properties of undefined (reading 'id')",
+    stackTrace: "    at getUserId (profile.js:6:15)",
+    code: `function findUserById(id) {
+  return id === "missing" ? undefined : { id, name: "Ada", email: "ada@example.com", role: "admin" };
+}
+
+function getUserId(user) {
+  return user.id;
+}
+
+function getUserProfile(id) {
+  const user = findUserById(id);
+  const profile = getUserId(user);
+  return { id: profile.id, name: profile.name, email: profile.email, role: profile.role };
+}`,
+  };
+  const { result, plan } = analyze(input);
+  const generated = buildTest(input, result, plan);
+  const workflowTest = `${generated.code}\ndescribe("missing-user profile workflow", () => {\n  it("returns null when the user lookup finds no user", () => {\n    expect(getUserProfile("missing")).toBeNull();\n  });\n});`;
+
+  it("guards the caller before reading profile properties", () => {
+    expect(result.fixedCode).toContain("if (!profile) {");
+    expect(result.fixedCode).toContain("return null;");
+  });
+
+  it("generates a regression test for the missing user argument", () => {
+    expect(generated.code).toContain("getUserId(undefined)");
+    expect(generated.code).toContain("toBeNull()");
+  });
+
+  it("reproduces the original failure and passes with standalone fixed code", () => {
+    const before = runSync(input.code, workflowTest);
+    const after = runSync(result.fixedCode ?? "", workflowTest);
+    expect(before.ok).toBe(true);
+    expect(before.ok && before.results.some((test) => !test.passed)).toBe(true);
+    expect(after.ok).toBe(true);
+    if (after.ok) expect(after.results.filter((test) => !test.passed)).toEqual([]);
+  });
+});
+
 describe("pattern: X is not iterable", () => {
   const input = {
     language: "JavaScript" as const,
