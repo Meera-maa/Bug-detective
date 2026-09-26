@@ -157,12 +157,20 @@ export function analyze(input: InvestigationInput): Analysis {
   if (input.language === "Python") {
     const found = analyzePython(input, combined);
     if (found) return found;
+    if (input.expectedResult?.trim() || input.actualResult?.trim()) {
+      const logicFound = analyzeLogicError(input, combined);
+      if (logicFound) return logicFound;
+    }
     return analyzeGeneric(input, combined, false);
   }
 
   if (input.language === "Java") {
     const found = analyzeJava(input, combined);
     if (found) return found;
+    if (input.expectedResult?.trim() || input.actualResult?.trim()) {
+      const logicFound = analyzeLogicError(input, combined);
+      if (logicFound) return logicFound;
+    }
     return analyzeGeneric(input, combined, false);
   }
 
@@ -275,6 +283,16 @@ function analyzeVariable(ctx: Ctx): Analysis | null {
   const isParam = fn?.params.includes(receiver) ?? false;
   if (!decl && !isParam) return null;
 
+  const paramIndex = fn?.params.indexOf(receiver) ?? -1;
+  const nullishCall = fn && paramIndex >= 0
+    ? lines.find((line) => {
+        if (line.n === fn.signatureLine) return false;
+        const call = new RegExp(`\\b${escapeRegExp(fn.name)}\\s*\\(([^)]*)\\)`).exec(line.text);
+        const args = call?.[1].split(",").map((arg) => arg.trim());
+        return args !== undefined && /^(?:undefined|null)$/.test(args[paramIndex] ?? "");
+      })
+    : undefined;
+
   const sourceExpr = decl ? (declRe.exec(decl.text)?.[1] ?? "") : receiver;
   const from = decl?.n ?? fn?.signatureLine ?? 1;
   const guarded = hasGuardBetween(lines, from, failing.n, receiver);
@@ -286,6 +304,7 @@ function analyzeVariable(ctx: Ctx): Analysis | null {
     decl
       ? `\`${receiver}\` is assigned from \`${truncate(sourceExpr, 50)}\` on line ${decl.n}, so it is only as reliable as that value.`
       : `\`${receiver}\` is a parameter of \`${fn?.name}\`, so callers decide whether it has a value.`,
+    ...(nullishCall ? [`Line ${nullishCall.n} calls \`${fn?.name}\` with an explicit \`${input.error.includes("null") ? "null" : "undefined"}\` argument for \`${receiver}\`.`] : []),
     guarded
       ? `A check involving \`${receiver}\` exists before line ${failing.n}, but it does not stop this path (worth double-checking).`
       : `No check for a missing \`${receiver}\` appears between ${decl ? `line ${decl.n}` : "the function start"} and line ${failing.n}.`,
@@ -316,7 +335,15 @@ function analyzeVariable(ctx: Ctx): Analysis | null {
       ? { kind: "null-guard", fnName: fn.name, rootParam, path, prop: err.prop, returnsProp: direct }
       : { kind: "generic", fnName: fn?.name };
 
-  const confidence: Confidence = !guarded && (stackConfirms || decl) ? (stackConfirms && decl ? "High" : "Medium") : "Low";
+  const stronglyCorroborated = !guarded && (
+    (direct && (stackConfirms || Boolean(decl) || Boolean(nullishCall))) ||
+    (stackConfirms && Boolean(decl))
+  );
+  const confidence: Confidence = stronglyCorroborated
+    ? "High"
+    : !guarded && (stackConfirms || decl || isParam)
+      ? "Medium"
+      : "Low";
 
   return {
     plan,
@@ -1442,6 +1469,37 @@ function extractCallArgs(
   return null;
 }
 
+function findLogicFunction(input: InvestigationInput, lines: CodeLine[], lineNumber: number): { name: string; params: string[] } | null {
+  if (input.language === "JavaScript" || input.language === "TypeScript") {
+    const context = findEnclosingFunction(lines, lineNumber);
+    return context ? { name: context.name, params: context.params } : null;
+  }
+
+  if (input.language === "Python") {
+    for (let i = lineNumber - 1; i >= 0; i--) {
+      const match = /^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(([^)]*)\)/.exec(lines[i].text);
+      if (!match) continue;
+      const signatureIndent = /^\s*/.exec(lines[i].text)?.[0].length ?? 0;
+      const bodyIndent = /^\s*/.exec(lines[lineNumber - 1].text)?.[0].length ?? 0;
+      if (bodyIndent <= signatureIndent) return null;
+      const params = match[2].split(",").map((param) => param.split(/[=:]/)[0].trim().replace(/^\*+/, ""));
+      return { name: match[1], params: params.filter((param) => /^[A-Za-z_]\w*$/.test(param)) };
+    }
+    return null;
+  }
+
+  if (input.language === "Java") {
+    for (let i = lineNumber - 1; i >= 0; i--) {
+      const methodPattern = /^\s*(?:(?:public|protected|private)\s+)?(?:(?:static|final|synchronized)\s+)*[\w$.<>?]+\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)/;
+      const match = methodPattern.exec(lines[i].text);
+      if (!match) continue;
+      const params = match[2].split(",").map((param) => /([A-Za-z_$][\w$]*)\s*$/.exec(param.trim())?.[1] ?? "");
+      return { name: match[1], params: params.filter(Boolean) };
+    }
+  }
+  return null;
+}
+
 function analyzeLogicError(input: InvestigationInput, combined: string): Analysis | null {
   const lines = toLines(input.code);
   const headline = firstLine(input.error);
@@ -1458,6 +1516,7 @@ function analyzeLogicError(input: InvestigationInput, combined: string): Analysi
   const evidence: string[] = [`The error message reads: \`${truncate(headline, 90)}\`.`];
   const suspects: string[] = [];
   let fixedCode: string | undefined;
+  let identifiedFnName: string | undefined;
 
   // ── Expected / Actual result provided by the user ────────────────────────
   // This is the highest-quality signal: the user told us what went wrong.
@@ -1481,13 +1540,14 @@ function analyzeLogicError(input: InvestigationInput, combined: string): Analysi
       evidence.push(`Line ${arith.lineN} (\`${truncate(arith.lineText)}\`) performs \`${arith.left} ${arith.op} ${arith.right}\`.`);
 
       // Try to resolve the parameter values from a visible call site.
-      const fn = findEnclosingFunction(lines, arith.lineN);
+      const fn = findLogicFunction(input, lines, arith.lineN);
+      identifiedFnName = fn?.name;
       const argMap = fn ? extractCallArgs(lines, fn.name, fn.params) : null;
-    fnArgs = fn && argMap
-  ? fn.params
+      fnArgs = fn && argMap
+        ? fn.params
       .map((param) => argMap.get(param))
       .filter((value): value is number => value !== undefined)
-  : [];
+        : [];
       if (argMap && argMap.has(arith.left) && argMap.has(arith.right)) {
         const a = argMap.get(arith.left)!;
         const b = argMap.get(arith.right)!;
@@ -1540,7 +1600,8 @@ function analyzeLogicError(input: InvestigationInput, combined: string): Analysi
   }
 
   // ── NaN propagation ──────────────────────────────────────────────────────
-  const hasNaN = /\bNaN\b/.test(combined);
+  const isJsLike = input.language === "JavaScript" || input.language === "TypeScript";
+  const hasNaN = isJsLike && /\bNaN\b/.test(combined);
   if (hasNaN) {
     evidence.push(`\`NaN\` (Not a Number) appears in the error. \`NaN\` propagates silently through arithmetic: any operation on \`NaN\` returns \`NaN\`. This is usually caused by parsing a non-numeric string with \`parseInt\`/\`parseFloat\`, dividing by zero, or applying math to \`undefined\`.`);
     const nanLines = lines.filter((l) => /\bparseInt\b|\bparseFloat\b|\bNumber\s*\(/.test(l.text) || /[+\-*/]\s*\bundefined\b/.test(l.text));
@@ -1551,28 +1612,28 @@ function analyzeLogicError(input: InvestigationInput, combined: string): Analysi
   }
 
   // ── Assignment used as condition (= vs ==) ────────────────────────────────
-  const assignInCondition = lines.find((l) => /\bif\s*\([^=!<>]+=[^=]/.test(l.text) && !/=>/g.test(l.text));
+  const assignInCondition = isJsLike ? lines.find((l) => /\bif\s*\([^=!<>]+=[^=]/.test(l.text) && !/=>/g.test(l.text)) : undefined;
   if (assignInCondition) {
     evidence.push(`Line ${assignInCondition.n} (\`${truncate(assignInCondition.text)}\`) uses a single \`=\` inside an \`if\` condition. This is an assignment, not a comparison. The condition will always be truthy (unless the assigned value is falsy), which is almost always a bug. Use \`===\` to compare.`);
     suspects.push("assignment-in-condition");
   }
 
   // ── Division by zero ─────────────────────────────────────────────────────
-  const divByZeroLine = lines.find((l) => /\/\s*0\b/.test(l.text) && !/\/\//.test(l.text.slice(0, l.text.indexOf("/0"))));
+  const divByZeroLine = isJsLike ? lines.find((l) => /\/\s*0\b/.test(l.text) && !/\/\//.test(l.text.slice(0, l.text.indexOf("/0")))) : undefined;
   if (divByZeroLine) {
     evidence.push(`Line ${divByZeroLine.n} (\`${truncate(divByZeroLine.text)}\`) divides by the literal \`0\`. In JavaScript this produces \`Infinity\` or \`NaN\`, not a thrown error, but the downstream calculation will produce wrong results.`);
     suspects.push("divide-by-zero");
   }
 
   // ── Off-by-one: comparing length with <= instead of < (or vice versa) ────
-  const offByOne = lines.find((l) => /\[\s*[\w.]+\s*\.\s*length\s*\]/.test(l.text));
+  const offByOne = isJsLike ? lines.find((l) => /\[\s*[\w.]+\s*\.\s*length\s*\]/.test(l.text)) : undefined;
   if (offByOne) {
     evidence.push(`Line ${offByOne.n} (\`${truncate(offByOne.text)}\`) accesses an array using \`.length\` as the index. Arrays are zero-indexed, so the last element is at index \`length - 1\`. Accessing \`arr[arr.length]\` returns \`undefined\`.`);
     suspects.push("off-by-one");
   }
 
   // ── Loose equality with null/undefined (== instead of ===) ───────────────
-  const looseNull = lines.find((l) => /[^=!]==[^=]/.test(l.text) && /null|undefined/.test(l.text));
+  const looseNull = isJsLike ? lines.find((l) => /[^=!]==[^=]/.test(l.text) && /null|undefined/.test(l.text)) : undefined;
   if (looseNull) {
     evidence.push(`Line ${looseNull.n} (\`${truncate(looseNull.text)}\`) uses \`==\` with \`null\` or \`undefined\`. While \`== null\` catches both \`null\` and \`undefined\`, use \`=== null\` and \`=== undefined\` explicitly for clarity and to avoid unexpected coercions.`);
     suspects.push("loose-equality");
@@ -1587,7 +1648,7 @@ function analyzeLogicError(input: InvestigationInput, combined: string): Analysi
   const frame = parseStackFrame(input.stackTrace ?? combined);
   if (frame) evidence.push(`The stack trace points to \`${frame.file}:${frame.line}:${frame.col}\`.`);
 
-  const fnName = findEnclosingFunction(lines, lines.length)?.name;
+  const fnName = identifiedFnName ?? findEnclosingFunction(lines, lines.length)?.name;
 
   // ── Determine confidence ──────────────────────────────────────────────────
   // High: operator identified and verified against numeric expected/actual
@@ -2167,6 +2228,33 @@ export function analyzeJava(input: InvestigationInput, combined: string): Analys
           `Why it works: the cast is only performed when the runtime type is confirmed to match.`,
         ].join("\n\n"),
         testSuggestion: `Cover: an object of the correct type (normal case), an object of the wrong type (the bug), and \`null\`.`,
+      },
+    };
+  }
+
+  // ── J6: IllegalArgumentException ──────────────────────────────────────────
+  const illegalArg = /\bIllegalArgumentException\b(?::\s*([^\r\n]+))?/.exec(combined);
+  if (illegalArg) {
+    const detail = illegalArg[1]?.trim();
+    const validationLine = (frame ? lines.find((line) => line.n === frame.line) : undefined)
+      ?? lines.find((line) => /throw\s+new\s+IllegalArgumentException\s*\(/.test(line.text));
+    const evidence: string[] = [`The error message reads: \`${javaTrunc(headline)}\`.`];
+    evidence.push(`\`IllegalArgumentException\` means a method rejected an argument that violates its accepted input constraints.`);
+    if (detail) evidence.push(`The exception detail is: \`${javaTrunc(detail)}\`.`);
+    if (validationLine) evidence.push(`Line ${validationLine.n} (\`${javaTrunc(validationLine.text)}\`) identifies where the invalid argument is rejected.`);
+    return {
+      plan: { kind: "generic", fnName: frame?.method },
+      result: {
+        problem: detail ? `An argument was rejected: ${javaTrunc(detail, 100)}.` : `A method rejected an invalid argument.`,
+        rootCause: validationLine
+          ? `The argument passed to the validation on line ${validationLine.n} does not meet the method's preconditions. Check the caller's value and validate it before invoking the method.`
+          : `A method received an argument outside its accepted range or format. Check the method's documented preconditions and the value supplied by its caller.`,
+        evidence,
+        confidence: validationLine && detail ? "High" : validationLine || detail ? "Medium" : "Low",
+        suggestedFix: validationLine
+          ? `Check the argument before the call on line ${validationLine.n} and provide a value that satisfies the documented preconditions. If this is user input, validate it at the boundary and report a useful message.`
+          : `Inspect the caller's argument and the method's documented preconditions. Validate input at the boundary and report a useful message for rejected values.`,
+        testSuggestion: `Cover a valid argument, a boundary value, and the invalid argument that triggered \`IllegalArgumentException\`.`,
       },
     };
   }

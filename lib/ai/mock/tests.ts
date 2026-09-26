@@ -295,6 +295,27 @@ function buildPythonTest(input: InvestigationInput, plan: TestPlan): GeneratedTe
   const plannedName = plan.kind === "generic" ? plan.fnName : undefined;
   const sourceName = /^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/m.exec(input.code)?.[1];
   const fnName = plannedName && /^[A-Za-z_]\w*$/.test(plannedName) ? plannedName : sourceName ?? "your_function";
+  if (plan.kind === "logic-error" && plan.args.length > 0 && Number.isFinite(plan.expected)) {
+    return {
+      framework: "Python unittest (standard library)",
+      filename: `test_${fnName}.py`,
+      code: [
+        "import unittest",
+        `from solution import ${fnName}  # Save the code under test as solution.py`,
+        "",
+        "",
+        "class TestGeneratedRegression(unittest.TestCase):",
+        "    def test_calculation_matches_expected_result(self):",
+        `        self.assertEqual(${fnName}(${plan.args.join(", ")}), ${plan.expected})`,
+        "",
+        "",
+        'if __name__ == "__main__":',
+        "    unittest.main()",
+        "",
+      ].join("\n"),
+      covers: ["The supplied numeric inputs", `Expected result: ${plan.expected}`],
+    };
+  }
   return {
     framework: "Python unittest (standard library)",
     filename: `test_${fnName}.py`,
@@ -323,8 +344,28 @@ function buildPythonTest(input: InvestigationInput, plan: TestPlan): GeneratedTe
 }
 
 function buildJavaTest(plan: TestPlan): GeneratedTest {
-  const suggestedMethod = plan.kind === "generic" ? plan.fnName : undefined;
+  const suggestedMethod = plan.kind === "generic" || plan.kind === "logic-error" ? plan.fnName : undefined;
   const method = suggestedMethod && /^[A-Za-z_$][\w$]*$/.test(suggestedMethod) ? suggestedMethod : "yourMethod";
+  if (plan.kind === "logic-error" && plan.args.length > 0 && Number.isFinite(plan.expected)) {
+    return {
+      framework: "JUnit 5",
+      filename: "YourClassTest.java",
+      code: [
+        "import org.junit.jupiter.api.Test;",
+        "import static org.junit.jupiter.api.Assertions.assertEquals;",
+        "",
+        "class YourClassTest {",
+        "    @Test",
+        "    void calculationMatchesExpectedResult() {",
+        "        YourClass subject = new YourClass(); // TODO: replace with the class under test",
+        `        assertEquals(${plan.expected}, subject.${method}(${plan.args.join(", ")})); // TODO: adapt constructor or static call`,
+        "    }",
+        "}",
+        "",
+      ].join("\n"),
+      covers: ["The supplied numeric inputs", `Expected result: ${plan.expected}`],
+    };
+  }
   return {
     framework: "JUnit 5",
     filename: "YourClassTest.java",

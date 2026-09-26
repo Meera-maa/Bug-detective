@@ -1,10 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { generateTest, UserFacingError } from "@/lib/client/api";
-import { attachTest } from "@/lib/storage";
+import { generateTest, investigate, UserFacingError } from "@/lib/client/api";
+import { attachTest, clearInvestigationDraft, removeRecord, saveInvestigation, saveInvestigationDraft } from "@/lib/storage";
 import type { InvestigationRecord } from "@/lib/types";
 import { CodeBlock } from "./CodeBlock";
 import { Confidence } from "./Confidence";
@@ -31,7 +30,42 @@ function View({ record }: { record: InvestigationRecord }) {
   const router = useRouter();
   const { result, input } = record;
   const [busy, setBusy] = useState(false);
+  const [reanalyzing, setReanalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  function onBackToInvestigate() {
+    saveInvestigationDraft({
+      error: input.error,
+      stackTrace: input.stackTrace ?? "",
+      code: input.code,
+      language: input.language,
+      expectedResult: input.expectedResult ?? "",
+      actualResult: input.actualResult ?? "",
+      showStack: Boolean(input.stackTrace),
+      showExpectedActual: Boolean(input.expectedResult || input.actualResult),
+    });
+    router.push("/");
+  }
+
+  function onStartNewInvestigation() {
+    removeRecord(record.id);
+    clearInvestigationDraft();
+    router.replace("/");
+  }
+
+  async function onAnalyzeAgain() {
+    if (reanalyzing) return;
+    setReanalyzing(true);
+    setError(null);
+    try {
+      const { result: nextResult, provider } = await investigate(input);
+      const { id } = saveInvestigation(input, nextResult, provider);
+      router.push(`/investigation/${id}`);
+    } catch (e) {
+      setError(e instanceof UserFacingError ? e.message : "The investigation could not be repeated. Please try again.");
+      setReanalyzing(false);
+    }
+  }
 
   async function onGenerateTest() {
     if (record.test) return router.push(`/investigation/${record.id}/test`);
@@ -59,12 +93,34 @@ function View({ record }: { record: InvestigationRecord }) {
               {record.title} · analysed by {record.provider}
             </p>
           </div>
-          <Link href="/" className={btnSecondary}>
-            New investigation
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={onBackToInvestigate} className={btnSecondary}>
+              ← Back
+            </button>
+            <button type="button" onClick={onStartNewInvestigation} className={btnPrimary}>
+              Start New Investigation
+            </button>
+          </div>
         </div>
-        <div className={`${card} px-4 py-4 sm:px-6`}>
-          <Stepper done={3} />
+        <div className={`${card} space-y-3 px-4 py-4 sm:px-6`}>
+          <Stepper
+            done={3}
+            actions={
+              <>
+                <button type="button" onClick={onAnalyzeAgain} disabled={reanalyzing} className={btnSecondary} aria-busy={reanalyzing}>
+                  {reanalyzing ? "Analyzing…" : "Analyze Again"}
+                </button>
+                <button type="button" onClick={onGenerateTest} disabled={busy} className={btnPrimary} aria-busy={busy}>
+                  {busy ? "Generating…" : record.test ? "View Test" : "Generate Test"}
+                </button>
+              </>
+            }
+          />
+          {error && (
+            <Notice tone="error" title="Could not complete this action">
+              {error}
+            </Notice>
+          )}
         </div>
       </header>
 
@@ -131,28 +187,11 @@ function View({ record }: { record: InvestigationRecord }) {
 
           <section className={`${card} space-y-3 p-5`} aria-labelledby="next-heading">
             <h2 id="next-heading" className="text-base font-semibold">
-              Next: lock the fix in
+              Regression test
             </h2>
             <p className="text-sm leading-relaxed text-muted">
               <Inline text={result.testSuggestion} />
             </p>
-            {error && (
-              <Notice tone="error" title="Could not generate the test">
-                {error}
-              </Notice>
-            )}
-            <button type="button" onClick={onGenerateTest} disabled={busy} className={`${btnPrimary} w-full`} aria-busy={busy}>
-              {busy ? (
-                <>
-                  <span className="spinner" aria-hidden="true" />
-                  Generating test…
-                </>
-              ) : record.test ? (
-                <>🧪 View Test</>
-              ) : (
-                <>🧪 Generate Test</>
-              )}
-            </button>
           </section>
         </aside>
       </div>

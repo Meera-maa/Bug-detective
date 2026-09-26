@@ -4,11 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { DEMOS } from "@/lib/demos";
 import { investigate, UserFacingError } from "@/lib/client/api";
-import { saveInvestigation } from "@/lib/storage";
+import { clearInvestigationDraft, saveInvestigation, saveInvestigationDraft, updateInvestigationDraft, useInvestigationDraft } from "@/lib/storage";
 import { LANGUAGES, type Language } from "@/lib/types";
 import { LIMITS, parseInvestigationInput } from "@/lib/validate";
 import { Notice } from "./Notice";
 import { RecentInvestigations } from "./RecentInvestigations";
+import { Stepper } from "./Stepper";
 import { btnPrimary, btnSecondary, card, fieldBase } from "./ui";
 
 type FieldErrors = { error?: string; code?: string; stackTrace?: string; expectedResult?: string; actualResult?: string };
@@ -27,14 +28,15 @@ function validate(error: string, stackTrace: string, code: string, expectedResul
 
 export function HomeWorkspace() {
   const router = useRouter();
-  const [error, setError] = useState("");
-  const [stackTrace, setStackTrace] = useState("");
-  const [code, setCode] = useState("");
-  const [language, setLanguage] = useState<Language>("JavaScript");
-  const [showStack, setShowStack] = useState(false);
-  const [showExpectedActual, setShowExpectedActual] = useState(false);
-  const [expectedResult, setExpectedResult] = useState("");
-  const [actualResult, setActualResult] = useState("");
+  const draft = useInvestigationDraft();
+  const error = draft?.error ?? "";
+  const stackTrace = draft?.stackTrace ?? "";
+  const code = draft?.code ?? "";
+  const language = draft?.language ?? "JavaScript";
+  const showStack = draft?.showStack ?? false;
+  const showExpectedActual = draft?.showExpectedActual ?? false;
+  const expectedResult = draft?.expectedResult ?? "";
+  const actualResult = draft?.actualResult ?? "";
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [serverError, setServerError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -52,26 +54,23 @@ export function HomeWorkspace() {
   function loadDemo(id: string) {
     const demo = DEMOS.find((d) => d.id === id);
     if (!demo) return;
-    setError(demo.input.error);
-    setStackTrace(demo.input.stackTrace ?? "");
-    setShowStack(Boolean(demo.input.stackTrace));
-    setCode(demo.input.code);
-    setLanguage(demo.input.language);
-    setExpectedResult("");
-    setActualResult("");
-    setShowExpectedActual(false);
+    saveInvestigationDraft({
+      error: demo.input.error,
+      stackTrace: demo.input.stackTrace ?? "",
+      code: demo.input.code,
+      language: demo.input.language,
+      expectedResult: "",
+      actualResult: "",
+      showStack: Boolean(demo.input.stackTrace),
+      showExpectedActual: false,
+    });
     setFieldErrors({});
     setServerError(null);
     setActiveDemo(id);
   }
 
   function clearAll() {
-    setError("");
-    setStackTrace("");
-    setCode("");
-    setExpectedResult("");
-    setActualResult("");
-    setShowExpectedActual(false);
+    clearInvestigationDraft();
     setFieldErrors({});
     setServerError(null);
     setActiveDemo(null);
@@ -89,6 +88,7 @@ export function HomeWorkspace() {
     const parsed = parseInvestigationInput({ error, stackTrace, code, language, expectedResult, actualResult });
     if (!parsed.ok) return setServerError(parsed.message);
 
+    saveInvestigationDraft({ error, stackTrace, code, language, expectedResult, actualResult, showStack, showExpectedActual });
     setLoading(true);
     setSlow(false);
     try {
@@ -107,7 +107,7 @@ export function HomeWorkspace() {
     e.preventDefault();
     const el = e.currentTarget;
     const { selectionStart: s, selectionEnd: end } = el;
-    setCode(`${code.slice(0, s)}  ${code.slice(end)}`);
+    updateInvestigationDraft({ code: `${code.slice(0, s)}  ${code.slice(end)}` });
     requestAnimationFrame(() => el.setSelectionRange(s + 2, s + 2));
   }
 
@@ -122,6 +122,30 @@ export function HomeWorkspace() {
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <div className={`${card} px-4 py-4 sm:px-6 lg:col-span-2`}>
+        <Stepper
+          done={0}
+          actions={
+            <>
+              {!empty && !loading && (
+                <button type="button" onClick={clearAll} className={btnSecondary}>
+                  Clear
+                </button>
+              )}
+              <button type="button" onClick={onInvestigate} disabled={loading} className={btnPrimary} aria-busy={loading}>
+                {loading ? (
+                  <>
+                    <span className="spinner" aria-hidden="true" />
+                    Investigating…
+                  </>
+                ) : (
+                  "Investigate Bug"
+                )}
+              </button>
+            </>
+          }
+        />
+      </div>
       <div className={`${card} p-5 sm:p-6`}>
         <div className="mb-5 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
           <h2 className="text-xl font-semibold tracking-tight">What went wrong?</h2>
@@ -156,7 +180,7 @@ export function HomeWorkspace() {
               rows={3}
               value={error}
               onChange={(e) => {
-                setError(e.target.value);
+                updateInvestigationDraft({ error: e.target.value });
                 if (fieldErrors.error) setFieldErrors((f) => ({ ...f, error: undefined }));
               }}
               placeholder="TypeError: Cannot read properties of undefined (reading 'name')"
@@ -185,7 +209,7 @@ export function HomeWorkspace() {
                 <select
                   id="language"
                   value={language}
-                  onChange={(e) => setLanguage(e.target.value as Language)}
+                  onChange={(e) => updateInvestigationDraft({ language: e.target.value as Language })}
                   className="rounded-md border border-line bg-code px-2 py-1 text-sm text-ink focus:border-accent focus:ring-1 focus:ring-accent"
                 >
                   {LANGUAGES.map((l) => (
@@ -202,7 +226,7 @@ export function HomeWorkspace() {
               rows={12}
               value={code}
               onChange={(e) => {
-                setCode(e.target.value);
+                updateInvestigationDraft({ code: e.target.value });
                 if (fieldErrors.code) setFieldErrors((f) => ({ ...f, code: undefined }));
               }}
               onKeyDown={onTab}
@@ -242,7 +266,7 @@ export function HomeWorkspace() {
                   <label htmlFor="stack" className="text-sm font-medium">
                     Stack trace <span className="font-normal text-muted">(optional)</span>
                   </label>
-                  <button type="button" className="text-xs text-muted hover:text-ink" onClick={() => setShowStack(false)}>
+                  <button type="button" className="text-xs text-muted hover:text-ink" onClick={() => updateInvestigationDraft({ showStack: false })}>
                     Hide
                   </button>
                 </div>
@@ -250,7 +274,7 @@ export function HomeWorkspace() {
                   id="stack"
                   rows={4}
                   value={stackTrace}
-                  onChange={(e) => setStackTrace(e.target.value)}
+                  onChange={(e) => updateInvestigationDraft({ stackTrace: e.target.value })}
                   placeholder={"    at getUserName (login.js:3:15)\n    at handleLogin (login.js:9:20)"}
                   spellCheck={false}
                   wrap="off"
@@ -259,7 +283,7 @@ export function HomeWorkspace() {
                 {fieldErrors.stackTrace && <p className="mt-1.5 text-sm text-danger">{fieldErrors.stackTrace}</p>}
               </>
             ) : (
-              <button type="button" className="text-sm text-muted underline-offset-2 hover:text-ink hover:underline" onClick={() => setShowStack(true)}>
+              <button type="button" className="text-sm text-muted underline-offset-2 hover:text-ink hover:underline" onClick={() => updateInvestigationDraft({ showStack: true })}>
                 + Add a stack trace {stackTrace.trim() ? "(has content)" : "(optional)"}
               </button>
             )}
@@ -275,7 +299,7 @@ export function HomeWorkspace() {
       <button
         type="button"
         className="text-xs text-muted hover:text-ink"
-        onClick={() => setShowExpectedActual(false)}
+        onClick={() => updateInvestigationDraft({ showExpectedActual: false })}
       >
         Hide
       </button>
@@ -284,7 +308,7 @@ export function HomeWorkspace() {
     <input
       id="expectedResult"
       value={expectedResult}
-      onChange={(e) => setExpectedResult(e.target.value)}
+      onChange={(e) => updateInvestigationDraft({ expectedResult: e.target.value })}
       placeholder="Example: 13"
       className={fieldBase}
     />
@@ -298,7 +322,7 @@ export function HomeWorkspace() {
     <input
       id="actualResult"
       value={actualResult}
-      onChange={(e) => setActualResult(e.target.value)}
+      onChange={(e) => updateInvestigationDraft({ actualResult: e.target.value })}
       placeholder="Example: 30"
       className={fieldBase}
     />
@@ -315,7 +339,7 @@ export function HomeWorkspace() {
   <button
     type="button"
     className="text-sm text-muted underline-offset-2 hover:text-ink hover:underline"
-    onClick={() => setShowExpectedActual(true)}
+    onClick={() => updateInvestigationDraft({ showExpectedActual: true })}
   >
     + Add expected & actual result (optional)
   </button>
@@ -330,14 +354,7 @@ export function HomeWorkspace() {
 
           <div className="flex flex-wrap items-center gap-3">
             <button type="button" onClick={onInvestigate} disabled={loading} className={btnPrimary} aria-busy={loading}>
-              {loading ? (
-                <>
-                  <span className="spinner" aria-hidden="true" />
-                  Investigating…
-                </>
-              ) : (
-                <>🔍 Investigate</>
-              )}
+              {loading ? "Investigating…" : "Investigate"}
             </button>
             {!empty && !loading && (
               <button type="button" onClick={clearAll} className={btnSecondary}>

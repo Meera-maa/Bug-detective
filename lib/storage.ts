@@ -1,7 +1,7 @@
 "use client";
 
 import { useSyncExternalStore } from "react";
-import type { GeneratedTest, InvestigationInput, InvestigationRecord, InvestigationResult, Severity } from "./types";
+import { LANGUAGES, type GeneratedTest, type InvestigationInput, type InvestigationRecord, type InvestigationResult, type Language, type Severity } from "./types";
 import { parseGeneratedTest, parseInvestigationInput, parseInvestigationResult } from "./validate";
 
 /**
@@ -10,12 +10,38 @@ import { parseGeneratedTest, parseInvestigationInput, parseInvestigationResult }
  */
 
 const KEY = "bug-detective:v1:history";
+const DRAFT_KEY = "bug-detective:v1:investigation-draft";
 const MAX_RECORDS = 20;
 const EMPTY: InvestigationRecord[] = [];
+const EMPTY_DRAFT: InvestigationDraft = {
+  error: "",
+  stackTrace: "",
+  code: "",
+  language: "JavaScript",
+  expectedResult: "",
+  actualResult: "",
+  showStack: false,
+  showExpectedActual: false,
+};
+
+export type InvestigationDraft = {
+  error: string;
+  stackTrace: string;
+  code: string;
+  language: Language;
+  expectedResult: string;
+  actualResult: string;
+  showStack: boolean;
+  showExpectedActual: boolean;
+};
 
 const listeners = new Set<() => void>();
+const draftListeners = new Set<() => void>();
 let cachedRaw: string | null = null;
 let cachedValue: InvestigationRecord[] = EMPTY;
+let cachedDraftRaw: string | null | undefined;
+let cachedDraft: InvestigationDraft | null = null;
+let draftFallback: InvestigationDraft | null | undefined;
 /** Used only when localStorage is blocked or full, so the current session still works. */
 let memoryFallback: InvestigationRecord[] | null = null;
 
@@ -150,4 +176,92 @@ export function clearHistory(): void {
 
 export function removeRecord(id: string): void {
   write(getSnapshot().filter((r) => r.id !== id));
+}
+
+function parseDraft(raw: string | null): InvestigationDraft | null {
+  if (!raw) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (typeof value !== "object" || value === null) return null;
+    const draft = value as Record<string, unknown>;
+    if (
+      typeof draft.error !== "string" ||
+      typeof draft.stackTrace !== "string" ||
+      typeof draft.code !== "string" ||
+      typeof draft.language !== "string" ||
+      !(LANGUAGES as readonly string[]).includes(draft.language) ||
+      typeof draft.expectedResult !== "string" ||
+      typeof draft.actualResult !== "string"
+    ) return null;
+    return {
+      error: draft.error,
+      stackTrace: draft.stackTrace,
+      code: draft.code,
+      language: draft.language as Language,
+      expectedResult: draft.expectedResult,
+      actualResult: draft.actualResult,
+      showStack: draft.showStack === true,
+      showExpectedActual: draft.showExpectedActual === true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getDraftSnapshot(): InvestigationDraft | null {
+  if (draftFallback !== undefined) return draftFallback;
+  let raw: string | null;
+  try {
+    raw = window.sessionStorage.getItem(DRAFT_KEY);
+  } catch {
+    return null;
+  }
+  if (raw !== cachedDraftRaw) {
+    cachedDraftRaw = raw;
+    cachedDraft = parseDraft(raw);
+  }
+  return cachedDraft;
+}
+
+function subscribeDraft(callback: () => void): () => void {
+  draftListeners.add(callback);
+  return () => draftListeners.delete(callback);
+}
+
+/** The current investigation form draft, with an empty server snapshot for hydration. */
+export function useInvestigationDraft(): InvestigationDraft | null {
+  return useSyncExternalStore(subscribeDraft, getDraftSnapshot, () => null);
+}
+
+export function saveInvestigationDraft(draft: InvestigationDraft): void {
+  try {
+    const raw = JSON.stringify(draft);
+    window.sessionStorage.setItem(DRAFT_KEY, raw);
+    cachedDraftRaw = raw;
+  } catch {
+    // The form remains usable when browser storage is unavailable.
+  }
+  cachedDraft = draft;
+  draftFallback = draft;
+  draftListeners.forEach((listener) => listener());
+}
+
+export function getInvestigationDraft(): InvestigationDraft | null {
+  return getDraftSnapshot();
+}
+
+export function updateInvestigationDraft(changes: Partial<InvestigationDraft>): void {
+  saveInvestigationDraft({ ...(getDraftSnapshot() ?? EMPTY_DRAFT), ...changes });
+}
+
+export function clearInvestigationDraft(): void {
+  try {
+    window.sessionStorage.removeItem(DRAFT_KEY);
+  } catch {
+    // Ignore blocked browser storage.
+  }
+  cachedDraftRaw = null;
+  cachedDraft = null;
+  draftFallback = null;
+  draftListeners.forEach((listener) => listener());
 }

@@ -66,6 +66,32 @@ describe("robustness", () => {
     expect(result.evidence.some((e) => /None|NoneType|attribute/i.test(e))).toBe(true);
   });
 
+  it("reports High confidence when an undefined argument causes a direct parameter property read", () => {
+    const { result } = analyze({
+      language: "JavaScript",
+      error: "TypeError: Cannot read properties of undefined (reading 'name')",
+      code: `function getUserName(user) {
+  return user.name;
+}
+
+const userName = getUserName(undefined);
+console.log(userName);`,
+    });
+
+    expect(result.confidence).toBe("High");
+    expect(result.evidence.some((entry) => /explicit `undefined` argument/.test(entry))).toBe(true);
+  });
+
+  it("keeps parameter-only undefined-property analysis at Medium without caller evidence", () => {
+    const { result } = analyze({
+      language: "JavaScript",
+      error: "TypeError: Cannot read properties of undefined (reading 'name')",
+      code: "function getUserName(user) {\n  return user.name;\n}",
+    });
+
+    expect(result.confidence).toBe("Medium");
+  });
+
   it.each([
     {
       language: "Python" as const,
@@ -646,6 +672,99 @@ ZeroDivisionError: division by zero`,
   });
 });
 
+describe("python: TypeError", () => {
+  const { result } = analyze({
+    language: "Python",
+    error: "TypeError: unsupported operand type(s) for +: 'int' and 'str'",
+    code: "def add_values(left, right):\n    return left + right",
+  });
+
+  it("identifies the incompatible operand types with high confidence", () => {
+    expect(result.confidence).toBe("High");
+    expect(result.rootCause).toMatch(/int.*str|str.*int/);
+    expect(result.evidence.some((entry) => /left \+ right/.test(entry))).toBe(true);
+  });
+});
+
+describe("python: NameError", () => {
+  const { result } = analyze({
+    language: "Python",
+    error: "NameError: name 'missing_value' is not defined",
+    code: "print(missing_value)",
+  });
+
+  it("identifies the unresolved name", () => {
+    expect(result.confidence).toBe("High");
+    expect(result.problem).toContain("missing_value");
+  });
+});
+
+describe("python: AttributeError", () => {
+  const { result } = analyze({
+    language: "Python",
+    error: "AttributeError: 'NoneType' object has no attribute 'name'",
+    code: "def get_name(user):\n    return user.name",
+  });
+
+  it("identifies the None attribute access", () => {
+    expect(result.confidence).toBe("High");
+    expect(result.rootCause).toMatch(/None.*name/);
+  });
+});
+
+describe("python: ValueError", () => {
+  const { result } = analyze({
+    language: "Python",
+    error: "ValueError: invalid literal for int() with base 10: 'abc'",
+    code: "def parse_count(value):\n    return int(value)",
+  });
+
+  it("identifies the invalid integer string", () => {
+    expect(result.confidence).toBe("High");
+    expect(result.problem).toContain("abc");
+    expect(result.suggestedFix).toMatch(/validate|try/i);
+  });
+});
+
+describe("python: wrong arithmetic operator from expected and actual results", () => {
+  const input = {
+    language: "Python" as const,
+    error: "AssertionError: incorrect total",
+    code: "def calculate_total(price, quantity):\n    return price + quantity\n\ntotal = calculate_total(10, 3)\nprint(total)",
+    expectedResult: "30",
+    actualResult: "13",
+  };
+  const { result, plan } = analyze(input);
+  const test = buildTest(input, result, plan);
+
+  it("identifies addition instead of multiplication and safely fixes it", () => {
+    expect(result.confidence).toBe("High");
+    expect(result.rootCause).toMatch(/addition.*multiplication/i);
+    expect(result.fixedCode).toContain("price * quantity");
+    expect(plan.kind).toBe("logic-error");
+  });
+
+  it("generates a runnable-shaped unittest assertion with inferred arguments", () => {
+    expect(test.filename).toBe("test_calculate_total.py");
+    expect(test.code).toContain("self.assertEqual(calculate_total(10, 3), 30)");
+    expect(test.code).not.toContain("vitest");
+  });
+});
+
+it("does not guess a specific Python operator without visible call arguments", () => {
+  const { result } = analyze({
+    language: "Python",
+    error: "AssertionError: incorrect total",
+    code: "def calculate_total(price, quantity):\n    return price + quantity",
+    expectedResult: "30",
+    actualResult: "13",
+  });
+
+  expect(result.confidence).toBe("Medium");
+  expect(result.fixedCode).toBeUndefined();
+  expect(result.rootCause).not.toMatch(/multiplication/i);
+});
+
 // ===========================================================================
 // Java analyzer tests (≥3 required)
 // ===========================================================================
@@ -733,6 +852,87 @@ describe("java: ArrayIndexOutOfBoundsException", () => {
   it("suggests a bounds check", () => {
     expect(result.suggestedFix.toLowerCase()).toMatch(/length|bounds|check/i);
   });
+});
+
+describe("java: ArithmeticException", () => {
+  const { result } = analyze({
+    language: "Java",
+    error: "java.lang.ArithmeticException: / by zero",
+    code: "class Divider {\n    int divide(int numerator, int denominator) {\n        return numerator / denominator;\n    }\n}",
+  });
+
+  it("identifies integer division by zero", () => {
+    expect(result.confidence).toBe("High");
+    expect(result.problem).toMatch(/division.*zero/i);
+    expect(result.suggestedFix).toMatch(/divisor|!= 0/);
+  });
+});
+
+describe("java: ClassCastException", () => {
+  const { result } = analyze({
+    language: "Java",
+    error: "java.lang.ClassCastException: class java.lang.Integer cannot be cast to class java.lang.String",
+    code: "class Converter {\n    String convert(Object value) {\n        return (String) value;\n    }\n}",
+  });
+
+  it("identifies the incompatible runtime types", () => {
+    expect(result.confidence).toBe("High");
+    expect(result.problem).toMatch(/Integer.*String/);
+    expect(result.suggestedFix).toContain("instanceof");
+  });
+});
+
+describe("java: IllegalArgumentException", () => {
+  const { result } = analyze({
+    language: "Java",
+    error: "java.lang.IllegalArgumentException: bound must be positive",
+    code: "class Randomizer {\n    int choose(int bound) {\n        if (bound <= 0) throw new IllegalArgumentException(\"bound must be positive\");\n        return bound;\n    }\n}",
+  });
+
+  it("points to the rejected argument and its precondition", () => {
+    expect(result.confidence).toBe("High");
+    expect(result.problem).toMatch(/bound must be positive/i);
+    expect(result.rootCause).toMatch(/precondition/i);
+  });
+});
+
+describe("java: wrong arithmetic operator from expected and actual results", () => {
+  const input = {
+    language: "Java" as const,
+    error: "AssertionError: incorrect total",
+    code: "class Totals {\n    public static int calculateTotal(int price, int quantity) {\n        return price + quantity;\n    }\n    public static void main(String[] args) {\n        int total = calculateTotal(10, 3);\n        System.out.println(total);\n    }\n}",
+    expectedResult: "30",
+    actualResult: "13",
+  };
+  const { result, plan } = analyze(input);
+  const test = buildTest(input, result, plan);
+
+  it("identifies addition instead of multiplication and safely fixes it", () => {
+    expect(result.confidence).toBe("High");
+    expect(result.rootCause).toMatch(/addition.*multiplication/i);
+    expect(result.fixedCode).toContain("price * quantity");
+    expect(plan.kind).toBe("logic-error");
+  });
+
+  it("generates a local JUnit assertion with inferred arguments", () => {
+    expect(test.filename).toBe("YourClassTest.java");
+    expect(test.code).toContain("assertEquals(30, subject.calculateTotal(10, 3))");
+    expect(test.code).not.toContain("vitest");
+  });
+});
+
+it("does not guess a specific Java operator without visible call arguments", () => {
+  const { result } = analyze({
+    language: "Java",
+    error: "AssertionError: incorrect total",
+    code: "class Totals {\n    int calculateTotal(int price, int quantity) {\n        return price + quantity;\n    }\n}",
+    expectedResult: "30",
+    actualResult: "13",
+  });
+
+  expect(result.confidence).toBe("Medium");
+  expect(result.fixedCode).toBeUndefined();
+  expect(result.rootCause).not.toMatch(/multiplication/i);
 });
 
 // ===========================================================================
