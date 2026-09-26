@@ -69,6 +69,23 @@ function inferGuardReturn(fixedCode: string | undefined, rootParam: string): str
   return value;
 }
 
+function inferGenericPropertyResult(fixedCode: string | undefined, fnName: string): { args: string; expected: string } | null {
+  if (!fixedCode) return null;
+  const signature = new RegExp(`function\\s+${escapeRegExp(fnName)}\\s*\\(([^)]*)\\)`).exec(fixedCode);
+  if (!signature) return null;
+  const params = signature[1].split(",").map((param) => param.trim());
+  const returnExpression = /\breturn\s+([A-Za-z_$][\w$]*(?:(?:\?\.|\.)[A-Za-z_$][\w$]*)+)\s*(?:\?\?\s*(?:null|undefined))?\s*;?/.exec(fixedCode)?.[1];
+  if (!returnExpression) return null;
+  const path = returnExpression.split(/\?\.|\./);
+  const root = path.shift();
+  if (!root || !params.includes(root) || path.length === 0) return null;
+
+  const fixture = path.reduceRight<unknown>((inner, key) => ({ [key]: inner }), sample(path[path.length - 1]));
+  const expected = sample(path[path.length - 1]);
+  const args = params.map((param) => param === root ? jsLiteral(fixture) : "undefined").join(", ");
+  return { args, expected: jsLiteral(expected) };
+}
+
 function buildMissingLookupTest(input: InvestigationInput, result: InvestigationResult, fnName: string, ext: string, framework: string): GeneratedTest | null {
   const signature = new RegExp(`(?:async\\s+)?function\\s+${escapeRegExp(fnName)}\\s*\\(([^)]*)\\)`).exec(input.code);
   const lookup = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\.find\(\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*=>\s*\3\.([A-Za-z_$][\w$]*)\s*===?\s*([A-Za-z_$][\w$]*)\s*\)/.exec(input.code);
@@ -360,6 +377,7 @@ export function buildTest(input: InvestigationInput, result: InvestigationResult
 }
     case "generic": {
       const fnName = plan.fnName ?? "yourFunction";
+      const inferredNormal = input.language === "JavaScript" ? inferGenericPropertyResult(result.fixedCode, fnName) : null;
       // The generic plan does not have enough information to produce concrete test values.
       // The test is a template — the developer must fill in the TODO values before running it.
       const code = [
@@ -376,9 +394,13 @@ export function buildTest(input: InvestigationInput, result: InvestigationResult
         `  });`,
         ``,
         `  it("still works for a normal input", () => {`,
-        `    const normalInput = undefined; // TODO: a valid input that should succeed`,
-        `    const expected = undefined;    // TODO: the value ${fnName}(normalInput) should return`,
-        `    expect(${fnName}(normalInput)).toEqual(expected);`,
+        ...(inferredNormal
+          ? [`    expect(${fnName}(${inferredNormal.args})).toBe(${inferredNormal.expected});`]
+          : [
+              `    const normalInput = undefined; // TODO: a valid input that should succeed`,
+              `    const expected = undefined;    // TODO: the value ${fnName}(normalInput) should return`,
+              `    expect(${fnName}(normalInput)).toEqual(expected);`,
+            ]),
         `  });`,
         `});`,
         ``,

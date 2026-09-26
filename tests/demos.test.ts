@@ -566,6 +566,42 @@ const users = [
   });
 });
 
+describe("pattern: generic API mismatch test infers normal property return", () => {
+  const input = {
+    language: "JavaScript" as const,
+    error: "TypeError: Cannot read properties of undefined (reading 'name')",
+    code: `function getUserName(data) {
+  return data.user.name;
+}`,
+  };
+  const result = {
+    problem: "The response shape does not match the code.",
+    rootCause: "The API returns name directly.",
+    evidence: ["The API response contains name."],
+    confidence: "High" as const,
+    suggestedFix: "Return the name from the response.",
+    testSuggestion: "Test normal and missing responses.",
+    fixedCode: `function getUserName(data) {
+  return data?.name ?? null;
+}`,
+  };
+  const test = buildTest(input, result, { kind: "generic", fnName: "getUserName" });
+
+  it("uses the fixture value as the expected return value", () => {
+    expect(test.code).toContain('expect(getUserName({ name: "Meera" })).toBe("Meera")');
+    expect(test.code).not.toContain("const expected = undefined");
+  });
+
+  it("reproduces the original error and passes with the fixed response access", () => {
+    const before = runSync(input.code, test.code);
+    const after = runSync(result.fixedCode ?? "", test.code);
+    expect(before.ok).toBe(true);
+    expect(before.ok && before.results.some((entry) => !entry.passed)).toBe(true);
+    expect(after.ok).toBe(true);
+    if (after.ok) expect(after.results.filter((entry) => !entry.passed)).toEqual([]);
+  });
+});
+
 describe("pattern: X is not iterable", () => {
   const input = {
     language: "JavaScript" as const,
