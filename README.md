@@ -30,14 +30,24 @@ Bug Detective turns that into one guided path:
 ```
 Error → Investigate → Root cause + Evidence → Fix → Regression test → Verify
 ```
+## Measured Impact
 
-**Measured impact** (to be filled with real measurements from the sample bugs, not estimates):
+We compared the time required to solve and verify the same debugging task using the usual approach versus Bug Detective.
 
-| Bug | Usual way (search + trial and error) | With Bug Detective |
-|---|---|---|
-| 1. Login TypeError | _to be measured_ | _to be measured_ |
-| 2. API response mismatch | _to be measured_ | _to be measured_ |
-| 3. Empty input crash | _to be measured_ | _to be measured_ |
+| **Method**    | **Trial 1** | **Trial 2** | **Trial 3** | **Average** |
+| ------------- | ----------- | ----------- | ----------- | ----------- |
+| Usual way     | 15:00       | 10:00       | 10:00       | **11:40**   |
+| Bug Detective | 1:00        | 2:21        | 2:01        | **1:47**    |
+
+### Result
+
+* **Usual way average:** 11 minutes 40 seconds
+* **Bug Detective average:** 1 minute 47 seconds
+* **Average time saved:** 9 minutes 53 seconds
+* **Time reduction:** approximately **85%**
+
+> **Note:** This was a controlled prototype benchmark using the same debugging task and three trials for each method. The result represents the tested prototype scenario and is not intended to represent general developer performance.
+
 
 ## Features
 
