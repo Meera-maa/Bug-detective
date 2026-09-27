@@ -30,9 +30,14 @@ Copy one block per Bob task. Fill it in right after the task, while you still re
 
 _(same fields as above)_
 
-## Summary table (fill at the end)
+## Summary table
 
-| # | Task | Files touched | Screenshot |
-|---|---|---|---|
-| 1 | | | |
-| 2 | | | |
+## IBM Bob 2.0 – Development Tasks
+
+| # | Task                                                                                                                                                                                                                          | Files Touched                                      | Screenshot                    |
+| - | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | ----------------------------- |
+| 1 | **Project Review:** Reviewed the project and identified key risks. The README was missing a live demo link and screenshots, and the test runner only supported JavaScript while Python and Java were advertised as supported. | None — read-only review                            | <img width="467" height="248" alt="image" src="https://github.com/user-attachments/assets/a725262a-93f3-4f4b-8c03-3397bc496c89" />|
+| 2 | **Bob Integration:** Asked Bob to inspect and fix the IBM Bob integration. Checked how Bob 2.0 should be used, reviewed `AI_PROVIDER` and `lib/ai/bob.ts`, and avoided inventing API endpoints or credentials.                | `lib/ai/bob.ts`                                    | `<img width="470" height="246" alt="image" src="https://github.com/user-attachments/assets/2beaf68d-f15a-4cf8-a01a-e6a34ba8ca63" />
+` |
+| 3 | **Bug Analyzer:** Expanded the bug analyzer beyond the three pre-built demos while keeping the existing demo behavior and tests working. **5/5 subtasks completed.**                                                          | `lib/ai/mock/analyzer.ts`<br>`tests/demos.test.ts` | <img width="465" height="262" alt="image" src="https://github.com/user-attachments/assets/c0cb962b-fe3f-4d2f-9756-61a933754def" />|
+
